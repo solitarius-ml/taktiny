@@ -30,14 +30,6 @@ from typing import *
 from functools import partial
 
 
-@dataclass(frozen=True)
-class TransformerAuxilialary:
-    key_cache: jax.Array
-    value_cache: jax.Array
-    position_idx: jax.Array
-    is_causal: bool
-
-
 @partial(
     jax.tree_util.register_dataclass,
     data_fields=['key_cache', 'value_cache', 'position_idx'],
@@ -49,126 +41,6 @@ class TransformerContext:
     value_cache: jax.Array | None
     position_idx: jax.Array | None
     is_causal: bool
-
-
-class TransformerDecoder(nn.Module):
-    def __init__(self, config, rngs: nn.Rngs):
-        shard_mode  = getattr(config, 'shard_mode', ShardMode.AUTO)
-        quant       = getattr(config, 'quant', None)
-        dot_general = getattr(config, 'dot_general', None)
-
-        assert (hidden_size             := config.hidden_size) is not None
-        assert (num_heads               := config.num_attention_heads) is not None
-        assert (num_kv_heads            := config.num_key_value_heads) is not None
-        assert (max_position_embeddings := config.max_position_embeddings) is not None
-        assert (rope_theta              := config.rope_theta) is not None
-        assert (hidden_act              := config.hidden_act) is not None 
-        assert (intermediate_size       := config.intermediate_size) is not None
-
-        dtype           = config.torch_dtype or config.dtype or 'bfloat16'
-        head_dim        = config.head_dim or hidden_size // num_heads        
-        mlp_bias        = config.mlp_bias or False
-        attention_bias  = config.attention_bias or False
-        eps             = config.rms_norm_eps or 1e-6
-        rope_scaling    = config.rope_scaling
-        sliding_window  = config.sliding_window
-        hidden_act      = config.hidden_act or config.hidden_activation or config.act or 'silu'
-
-        self.hidden_size                = hidden_size
-        self.dtype                      = dtype
-        self.num_heads                  = num_heads
-        self.num_kv_heads               = num_kv_heads
-        self.max_position_embeddings    = max_position_embeddings
-        self.rope_theta                 = rope_theta
-        self.attention_bias             = attention_bias
-        self.hidden_act                 = hidden_act 
-        self.intermediate_size          = intermediate_size 
-        self.head_dim                   = head_dim 
-        self.mlp_bias                   = mlp_bias 
-        self.eps                        = eps 
-        self.rope_scaling               = rope_scaling 
-        self.sliding_window             = sliding_window
-        
-        self.norm1 = nn.RMSNorm(
-            hidden_size, 
-            eps=eps, 
-            dtype=jnp.float32, 
-            shard_mode=shard_mode, 
-            axis_names=('embed',)
-        )
-        
-        self.attn = Attention(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            pos_emb=RotaryEmbedding(
-                head_dim, 
-                max_position_embeddings,
-                rope_theta,
-                rope_scaling
-            ),
-            bias=attention_bias,
-            dtype=dtype,
-            rngs=rngs,
-            # Fully Granular Logical Axes
-            q_axis_names=('embed', 'heads', 'head_dim'),
-            k_axis_names=('embed', 'kv_heads', 'head_dim'),
-            v_axis_names=('embed', 'kv_heads', 'head_dim'),
-            o_axis_names=('heads', 'head_dim', 'embed'),
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general
-        )
-        self.norm2 = nn.RMSNorm(
-            hidden_size, 
-            eps=eps, 
-            dtype=jnp.float32, 
-            shard_mode=shard_mode, 
-            axis_names=('embed',)
-        )
-        
-        activation_fn = getattr(jax.nn, hidden_act)
-        self.mlp = GateMLP(
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            activation=activation_fn,
-            bias=mlp_bias,
-            dtype=dtype,
-            rngs=rngs,
-            # Fully Granular Logical Axes
-            gate_axis_names=('embed', 'mlp'),
-            up_axis_names=('embed', 'mlp'),
-            down_axis_names=('mlp', 'embed'),
-            shard_mode=shard_mode,
-            quant=quant,
-            dot_general=dot_general
-        )
-
-    def __call__(
-        self, 
-        x: jax.Array, 
-        attention_mask: jax.Array = None, 
-        kv_cache: tuple[jax.Array, jax.Array] = None,
-        position_idx: jax.Array = None,
-        is_causal: bool = False,
-        out_sharding = None
-    ):
-        attn_out, new_cache = self.attn(
-            self.norm1(x), 
-            attention_mask=attention_mask, 
-            is_causal=is_causal, 
-            kv_cache=kv_cache, 
-            position_idx=position_idx,
-            out_sharding=out_sharding
-        )
-        
-        x = x + attn_out
-        x = x + self.mlp(
-            self.norm2(x), 
-            out_sharding=out_sharding
-        )
-        return x, new_cache
 
 
 class TransformerDecoderLayer(nn.Module):
@@ -188,6 +60,8 @@ class TransformerDecoderLayer(nn.Module):
         config: Model configuration containing the hidden size, attention
             dimensions, positional embedding settings, and MLP settings.
         rngs: Random number generator used to initialize parameterized modules.
+        layer_idx: Index of this layer in the model. This selects per-layer
+            attention modes such as Gemma2's alternating sliding/full pattern.
         **modules: Ordered mapping from checkpoint-facing module names to
             ``nn.Module`` subclasses or initialized module instances. Supported
             types are normalization, ``Attention``, and ``GateMLP`` modules.
@@ -197,7 +71,7 @@ class TransformerDecoderLayer(nn.Module):
         cache, or ``None`` when no cache was supplied.
     """
 
-    def __init__(self, config, *, rngs, **modules):
+    def __init__(self, config, *, rngs, layer_idx=None, **modules):
         shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
         quant = getattr(config, 'quant', None)
         dot_general = getattr(config, 'dot_general', None)
@@ -206,7 +80,11 @@ class TransformerDecoderLayer(nn.Module):
         num_heads = getattr(config, 'num_attention_heads', None)
         num_kv_heads = getattr(config, 'num_key_value_heads', None)
         max_position_embeddings = getattr(config, 'max_position_embeddings', None)
-        rope_theta = getattr(config, 'rope_theta', None)
+        rope_parameters = getattr(config, 'rope_parameters', None) or {}
+        rope_theta = (
+            getattr(config, 'rope_theta', None)
+            or rope_parameters.get('rope_theta')
+        )
         intermediate_size = getattr(config, 'intermediate_size', None)
 
         required = {
@@ -236,12 +114,25 @@ class TransformerDecoderLayer(nn.Module):
         sliding_window = getattr(config, 'sliding_window', None)
         if getattr(config, 'use_sliding_window', None) is False:
             sliding_window = None
+        layer_types = getattr(config, 'layer_types', None)
+        if layer_idx is not None and layer_types is not None:
+            layer_type = layer_types[layer_idx]
+            if layer_type in ('full_attention', 'full'):
+                sliding_window = None
         hidden_act = (
             getattr(config, 'hidden_act', None)
             or getattr(config, 'hidden_activation', None)
             or getattr(config, 'act', None)
             or 'silu'
         )
+        if hidden_act in ('gelu_pytorch_tanh', 'gelu_new', 'gelu_fast'):
+            hidden_act = partial(jax.nn.gelu, approximate=True)
+        attention_scaling = None
+        query_pre_attn_scalar = getattr(config, 'query_pre_attn_scalar', None)
+        if query_pre_attn_scalar is not None:
+            attention_scaling = query_pre_attn_scalar ** -0.5
+        attention_softcap = getattr(config, 'attn_logit_softcapping', None)
+        attention_dropout = getattr(config, 'attention_dropout', None) or 0.0
 
         if hidden_size % num_heads != 0 and getattr(config, 'head_dim', None) is None:
             raise ValueError(
@@ -267,6 +158,7 @@ class TransformerDecoderLayer(nn.Module):
         self.eps = eps
         self.rope_scaling = rope_scaling
         self.sliding_window = sliding_window
+        self.layer_idx = layer_idx
 
         if not modules:
             raise ValueError('TransformerDecoderLayer requires at least one module')
@@ -288,6 +180,9 @@ class TransformerDecoderLayer(nn.Module):
                 sliding_window=sliding_window,
                 hidden_act=hidden_act,
                 attention_bias=attention_bias,
+                attention_scaling=attention_scaling,
+                attention_softcap=attention_softcap,
+                attention_dropout=attention_dropout,
                 mlp_bias=mlp_bias,
                 eps=eps,
                 dtype=dtype,
@@ -319,6 +214,9 @@ class TransformerDecoderLayer(nn.Module):
         sliding_window,
         hidden_act,
         attention_bias,
+        attention_scaling,
+        attention_softcap,
+        attention_dropout,
         mlp_bias,
         eps,
         dtype,
@@ -370,6 +268,9 @@ class TransformerDecoderLayer(nn.Module):
                 v_axis_names=('embed', 'kv_heads', 'head_dim'),
                 o_axis_names=('heads', 'head_dim', 'embed'),
                 window_size=sliding_window,
+                scaling=attention_scaling,
+                softcap=attention_softcap,
+                dropout=attention_dropout,
                 shard_mode=shard_mode,
                 quant=quant,
                 dot_general=dot_general,
@@ -494,7 +395,8 @@ class TransformerModel(nn.Module):
         config: Model configuration containing ``num_hidden_layers``,
             ``vocab_size``, ``hidden_size``, and the decoder settings.
         rngs: Random number generator used for embeddings and decoder layers.
-        module: Decoder-layer ``nn.Module`` subclass to repeat.
+        module: Decoder-layer ``nn.Module`` subclass to repeat. It receives its
+            zero-based ``layer_idx`` when instantiated.
         embedding: Embedding ``nn.Module`` subclass or initialized instance.
         norm: Optional final normalization module type or instance.
 
@@ -516,6 +418,11 @@ class TransformerModel(nn.Module):
             raise ValueError('Missing required transformer config value: vocab_size')
         if hidden_size is None:
             raise ValueError('Missing required transformer config value: hidden_size')
+        dtype = (
+            getattr(config, 'torch_dtype', None)
+            or getattr(config, 'dtype', None)
+            or 'bfloat16'
+        )
         if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
             raise ValueError('num_hidden_layers must be a positive integer')
         if not isinstance(module, type) or not issubclass(module, nn.Module):
@@ -523,7 +430,12 @@ class TransformerModel(nn.Module):
         if isinstance(embedding, nn.Module):
             embed_tokens = embedding
         elif isinstance(embedding, type) and issubclass(embedding, nn.Module):
-            embed_tokens = embedding(vocab_size, hidden_size, rngs=rngs)
+            embed_tokens = embedding(
+                vocab_size,
+                hidden_size,
+                rngs=rngs,
+                dtype=dtype,
+            )
         else:
             raise TypeError('embedding must be an nn.Module subclass or instance')
 
@@ -536,7 +448,10 @@ class TransformerModel(nn.Module):
             self.embed_tokens.embedding.axis_names = ('vocab', 'embed')
 
         self.layers = nn.List(
-            *(module(config, rngs=rngs) for _ in range(num_hidden_layers))
+            *(
+                module(config, rngs=rngs, layer_idx=layer_idx)
+                for layer_idx in range(num_hidden_layers)
+            )
         )
 
         self.norm = None
@@ -625,348 +540,6 @@ class TransformerModel(nn.Module):
         return x, new_cache
 
 
-default_embedder = nn.Embedding
-default_lm_head = nn.Linear
-class TransformerLM(PretrainedModel):
-    # Default Megatron-LM Tensor Parallelism rules
-    default_sharding_rules = [
-        # --- Weight Axes ---
-        ('vocab', 'tp'),
-        ('embed', None),
-        ('heads', 'tp'),
-        ('kv_heads', 'tp'),
-        ('head_dim', None),
-        ('mlp', 'tp'),
-        
-        # --- Activation Axes ---
-        ('batch', 'fsdp'),
-        ('sequence', None),
-    ]
-
-    def __init__(
-        self, 
-        decoder: nn.Module, 
-        embedder: nn.Module = default_embedder,
-        lm_head: nn.Module = default_lm_head, 
-        *, config: ModelConfig,
-        rngs: nn.Rngs = None,
-        mesh: jax.sharding.Mesh = None,
-        sharding_rules: Optional[List[Tuple]] = None
-    ):
-        if rngs is None:
-            rngs = nn.Rngs(0)
-            
-        self.shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
-        self.quant = getattr(config, 'quant', None)
-        self.dot_general = getattr(config, 'dot_general', None)
-
-        assert (vocab_size := config.vocab_size) is not None
-        assert (hidden_size := config.hidden_size) is not None
-        assert (rms_norm_eps := config.rms_norm_eps) is not None
-        assert (num_hidden_layers := config.num_hidden_layers) is not None
-
-        self.vocab_size = vocab_size
-        self.hidden_size = hidden_size
-        self.rms_norm_eps = rms_norm_eps
-        self.num_hidden_layers = num_hidden_layers
-            
-        self.config = config
-
-        self.embed_tokens = embedder(self.vocab_size, self.hidden_size, rngs=rngs)
-        if hasattr(self.embed_tokens, 'embedding'):
-            self.embed_tokens.embedding.axis_names = ('vocab', 'embed')
-
-        self.norm = nn.RMSNorm(
-            self.hidden_size, 
-            eps=self.rms_norm_eps, 
-            dtype=jnp.float32, 
-            shard_mode=self.shard_mode, 
-            axis_names=('embed',)
-        )
-
-        self.layers = nn.SequentialStack(
-            decoder, config, rngs, 
-            num_stack=self.num_hidden_layers
-        )
-
-        self.lm_head = None
-        if lm_head is not None:
-            self.lm_head = lm_head(
-                self.hidden_size, 
-                self.vocab_size, 
-                bias=False, 
-                dtype=jnp.float32, 
-                rngs=rngs, 
-                axis_names=('embed', 'vocab'), 
-                shard_mode=self.shard_mode, 
-                quant=self.quant, 
-                dot_general=self.dot_general
-            )
-
-        if sharding_rules is None:
-            sharding_rules = self.default_sharding_rules
-
-        self.out_sharding = None
-        if mesh is not None and self.shard_mode == ShardMode.EXPLICIT:
-            self.out_sharding = create_sharding(
-                mesh, 
-                ('batch', 'sequence', 'embed'), 
-                rules=sharding_rules
-            )
-
-
-    def __call__(
-        self, x: jax.Array, 
-        attention_mask: jax.Array = None, 
-        aux = None
-    ):
-        x = self.embed_tokens(x)
-        
-        has_cache = aux is not None and getattr(aux, 'key_cache', None) is not None
-        if has_cache:
-            carry = (x, (aux.key_cache, aux.value_cache), 0)
-
-        else:
-            carry = (x, None, 0)
-            
-        position_idx = getattr(aux, 'position_idx', None)
-        is_causal = getattr(aux, 'is_causal', False)
-        
-        def forward_stack(layer, carry):
-            h, full_kv_cache, layer_idx = carry
-            current_kv = (full_kv_cache[0][layer_idx], full_kv_cache[1][layer_idx]) if has_cache else None
-            
-            h, next_cache = layer(
-                h, 
-                attention_mask=attention_mask, 
-                kv_cache=current_kv,
-                position_idx=position_idx,
-                is_causal=is_causal,
-                out_sharding=self.out_sharding
-            )
-            
-            if has_cache:
-                new_k_cache = full_kv_cache[0].at[layer_idx].set(next_cache[0])
-                new_v_cache = full_kv_cache[1].at[layer_idx].set(next_cache[1])
-                full_kv_cache = (new_k_cache, new_v_cache)
-                
-            return h, full_kv_cache, layer_idx + 1
-            
-        x, final_kv_cache, _ = self.layers(forward_stack, carry)
-        
-        x = self.norm(x, out_sharding=self.out_sharding)
-
-        if self.lm_head is not None:
-            logits = self.lm_head(x, out_sharding=self.out_sharding)
-            
-            if has_cache:
-                aux = replace(
-                    aux, 
-                    key_cache=final_kv_cache[0], 
-                    value_cache=final_kv_cache[1]
-                )
-                
-            return logits, aux
-        
-        return x, aux
-
-    @classmethod
-    def _load_from_pretrained(cls, path_or_repo, config, module_map, **kwargs):
-        module_map = module_map or []
-        if isinstance(module_map, dict):
-            module_map = list(module_map.items())
-            
-        tied = getattr(config, 'tie_word_embeddings', False)
-        
-        new_module_map = []
-        for rule in module_map:
-            if len(rule) == 2:
-                source, target = rule
-                if tied and target == "embed_tokens.embedding":
-                    new_module_map.append((source, ["embed_tokens.embedding", "lm_head.weight"], lambda x: [x, x]))
-                    continue
-
-            new_module_map.append(rule)
-            
-        return super().from_pretrained(path_or_repo, config=config, module_map=new_module_map, **kwargs)
-
-    @classmethod
-    def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
-        # Load config
-        if 'config' in kwargs:
-            config = kwargs.pop('config')
-        else:
-            config = ModelConfig.load_config(path_or_repo, local=local)
-        
-        # We define how HuggingFace weights map to our components using our new Tuple format
-        module_map = [
-            ("model.", ""),
-            ("input_layernorm", "norm1"),
-            ("post_attention_layernorm", "norm2"),
-            ("self_attn", "attn"),
-            ("embed_tokens.weight", "embed_tokens.embedding"),
-        ]
-
-        # Call the base class safetensors loader
-        # (Note: PretrainedModel.from_pretrained will need to be updated to pass mesh and sharding_rules down!)
-        return cls._load_from_pretrained(
-            path_or_repo, 
-            config, 
-            module_map, 
-            local=local, 
-            mesh=mesh,
-            sharding_rules=sharding_rules,
-            **kwargs
-        )
-    
-    def _sample(
-        self, 
-        logits: jax.Array, 
-        temperature: float, 
-        top_k: int, 
-        top_p: float, 
-        key: jax.Array
-    ) -> jax.Array:
-        logits = logits / jnp.maximum(temperature, 1e-5)
-        
-        if top_k > 0:
-            top_k_logits, _ = jax.lax.top_k(logits, top_k)
-            min_top_k = top_k_logits[:, -1:]
-            logits = jnp.where(logits >= min_top_k, logits, -jnp.inf)
-            
-        if top_p < 1.0:
-            sorted_indices = jnp.argsort(logits, axis=-1)[:, ::-1]
-            sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
-            cumulative_probs = jnp.cumsum(jax.nn.softmax(sorted_logits, axis=-1), axis=-1)
-            
-            # Remove tokens with cumulative probability above the threshold
-            sorted_indices_to_remove = cumulative_probs > top_p
-            # Shift the mask to the right to keep the first token that crosses the threshold
-            sorted_indices_to_remove = jnp.roll(sorted_indices_to_remove, 1, axis=-1)
-            sorted_indices_to_remove = sorted_indices_to_remove.at[:, 0].set(False)
-            
-            # Map back to original order
-            indices_to_remove = jnp.empty_like(sorted_indices_to_remove)
-            indices_to_remove = indices_to_remove.at[
-                jnp.arange(logits.shape[0])[:, None], sorted_indices
-            ].set(sorted_indices_to_remove)
-            
-            logits = jnp.where(indices_to_remove, -jnp.inf, logits)
-            
-        return jax.random.categorical(key, logits)[:, None]
-
-    @partial(jax.jit, static_argnames=['max_seq_len', 'top_k', 'top_p'])
-    def _decode_step(
-        self, carry, 
-        max_seq_len: int = None, 
-        temperature: float = 1.0, 
-        top_k: int = 50, 
-        top_p: float = 1.0
-    ):
-        token, k_cache, v_cache, pos, rng = carry
-        
-        decode_aux = TransformerAuxilialary(
-            key_cache=k_cache,
-            value_cache=v_cache,
-            position_idx=pos,
-            is_causal=False
-        )
-        
-        # Mask to attend to all past tokens up to pos
-        mask = jnp.arange(max_seq_len) <= pos
-        mask = mask.reshape(1, 1, 1, max_seq_len)
-        
-        step_logits, decode_aux = self(token, attention_mask=mask, aux=decode_aux)
-        
-        rng, subkey = jax.random.split(rng)
-        next_t = self._sample(step_logits[:, -1, :], temperature, top_k, top_p, subkey)
-        
-        return (
-            next_t,
-            decode_aux.key_cache,
-            decode_aux.value_cache,
-            pos + 1,
-            rng,
-        ), next_t
-
-    def generate(
-        self, 
-        input_ids: jax.Array, 
-        max_new_tokens: int,
-        temperature: float = 1.0,
-        top_k: int = 50,
-        top_p: float = 1.0,
-        key: jax.Array = None
-    ) -> jax.Array:
-        if key is None:
-            key = jax.random.key(42)
-            
-        batch_size, seq_len = input_ids.shape
-        max_seq_len = seq_len + max_new_tokens
-
-        assert (num_layers := self.config.num_hidden_layers) is not None, \
-            'Cannot specified `num_hidden_layers` for key value cache generation.'
-
-        assert (num_attention_heads := self.config.num_attention_heads) is not None, \
-            'Cannot specified `num_attention_heads` for key value cache generation.'
-            
-        assert (num_kv_heads := self.config.num_key_value_heads) is not None, \
-            'Cannot specified `num_key_value_heads` for key value cache generation.'
-            
-        assert (hidden_size := self.config.hidden_size) is not None, \
-            'Cannot specified `head_dim` for key value cache generation'
-            
-        head_dim = hidden_size // num_attention_heads
-        
-        # Initialize KV Cache with the model's actual dtype (e.g. bfloat16)
-        leaves = jax.tree_util.tree_leaves(self)
-        arrays = [leaf for leaf in leaves if getattr(leaf, 'dtype', None) is not None]
-        model_dtype = arrays[0].dtype if arrays else jnp.float32
-        
-        k_cache = jnp.zeros((num_layers, batch_size, max_seq_len, num_kv_heads, head_dim), dtype=model_dtype)
-        v_cache = jnp.zeros((num_layers, batch_size, max_seq_len, num_kv_heads, head_dim), dtype=model_dtype)
-        
-        # Prefill phase
-        position_idx = jnp.array(0, dtype=jnp.int32)
-        aux = TransformerAuxilialary(
-            key_cache=k_cache,
-            value_cache=v_cache,
-            position_idx=position_idx,
-            is_causal=True # JAX native dot_product_attention handles causal masking if True
-        )
-        
-        logits, aux = self(input_ids, attention_mask=None, aux=aux)
-        next_token_logits = logits[:, -1, :]
-        
-        key, subkey = jax.random.split(key)
-        next_token = self._sample(next_token_logits, temperature, top_k, top_p, subkey)
-        
-        # 3. Decoding phase
-        def scan_decode_step(carry, _):
-            return self._decode_step(
-                carry, 
-                max_seq_len=max_seq_len, 
-                temperature=temperature, 
-                top_k=top_k, 
-                top_p=top_p
-            )
-            
-        initial_pos = jnp.array(seq_len, dtype=jnp.int32)
-        initial_carry = (
-            next_token,
-            aux.key_cache,
-            aux.value_cache,
-            initial_pos,
-            key,
-        )
-        _, new_tokens = jax.lax.scan(scan_decode_step, initial_carry, None, length=max_new_tokens - 1)
-        
-        # new_tokens is shape [max_new_tokens - 1, batch_size, 1] -> swap to [batch_size, max_new_tokens - 1]
-        new_tokens = new_tokens.swapaxes(0, 1).reshape(batch_size, -1)
-        
-        return jnp.concatenate([input_ids, next_token, new_tokens], axis=1)
-
-
 class TransformerCausalLM(PretrainedModel):
     """Causal language model composed from an embedding, decoder, and LM head.
 
@@ -998,7 +571,16 @@ class TransformerCausalLM(PretrainedModel):
         ``TransformerContext``, or ``None`` when no context was supplied.
     """
 
-    default_sharding_rules = TransformerLM.default_sharding_rules
+    default_sharding_rules = [
+        ('vocab', 'tp'),
+        ('embed', None),
+        ('heads', 'tp'),
+        ('kv_heads', 'tp'),
+        ('head_dim', None),
+        ('mlp', 'tp'),
+        ('batch', 'fsdp'),
+        ('sequence', None),
+    ]
 
     def __init__(
         self, config: ModelConfig,
@@ -1298,7 +880,10 @@ class TransformerCausalLM(PretrainedModel):
         assert (hidden_size := self.config.hidden_size) is not None, \
             'Cannot specified `head_dim` for key value cache generation'
             
-        head_dim = hidden_size // num_attention_heads
+        head_dim = (
+            getattr(self.config, 'head_dim', None)
+            or hidden_size // num_attention_heads
+        )
         
         # Initialize KV Cache with the model's actual dtype (e.g. bfloat16)
         leaves = jax.tree_util.tree_leaves(self)
@@ -1371,7 +956,6 @@ __all__ = [
     'TransformerContext',
     'TransformerDecoderLayer',
     'TransformerModel',
-    'TransformerLM',
     'TransformerCausalLM',
     'TransformerMM',
     'DiffusionLM',

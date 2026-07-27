@@ -20,6 +20,7 @@ from jax.nn.initializers import normal
 
 from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
+from taktiny.utils.typing import DType
 
 class Embedding(Module):
     def __init__(
@@ -27,6 +28,7 @@ class Embedding(Module):
         embedding_dim: int, *, 
         rngs: Rngs = None, 
         seed: Rngs = None, 
+        dtype: DType | str = jnp.float32,
         initializer = normal(0.02)
     ):
         self.num_embeddings = num_embeddings
@@ -41,7 +43,9 @@ class Embedding(Module):
             rngs = seed
             
         key = rngs()
-        self.embedding = Parameter(initializer(key, (num_embeddings, embedding_dim), jnp.float32))
+        self.embedding = Parameter(
+            initializer(key, (num_embeddings, embedding_dim), dtype)
+        )
         
     def __call__(self, indices: jax.Array) -> jax.Array:
         return self.embedding[indices]

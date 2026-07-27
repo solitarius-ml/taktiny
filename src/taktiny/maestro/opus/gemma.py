@@ -18,14 +18,21 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes._common import TransformerLM, DiffusionLM, TransformerMM
+from taktiny.cosettes._common import (
+    TransformerCausalLM,
+    DiffusionLM,
+    TransformerMM,
+)
 from taktiny.cosettes.transformers.gemma import (
-    GemmaTextScaledWordEmbedding, GemmaRMSNorm, GemmaTransformerBlock
+    GemmaTextScaledWordEmbedding,
+    GemmaRMSNorm,
+    GemmaDecoderLayer,
+    Gemma2DecoderLayer,
 )
 from taktiny import nn
 
 
-class Gemma(TransformerLM):
+class Gemma(TransformerCausalLM):
     def __init__(
         self, 
         config, 
@@ -33,44 +40,85 @@ class Gemma(TransformerLM):
         mesh=None, 
         sharding_rules=None
     ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
+        config.tie_word_embeddings = True
         super().__init__(
-            GemmaTransformerBlock,
-            GemmaTextScaledWordEmbedding,
-            config=config,
+            config,
             rngs=rngs,
+            embedding=GemmaTextScaledWordEmbedding,
+            decoder=GemmaDecoderLayer,
+            norm=GemmaRMSNorm,
             mesh=mesh,
-            sharding_rules=sharding_rules
-        )
-            
-        self.norm = GemmaRMSNorm(
-            config.hidden_size, 
-            eps=config.rms_norm_eps, 
-            dtype=jnp.float32, 
-            shard_mode=self.shard_mode, 
-            axis_names=('embed',)
+            sharding_rules=sharding_rules,
         )
 
     @classmethod
     def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
-        # Load config
         from taktiny.maestro._config import ModelConfig
-        config = ModelConfig.load_config(path_or_repo, local=local)
-        
-        # Gemma models always tie word embeddings, but the HF config.json might not explicitly have this field
+        if 'config' in kwargs:
+            config = kwargs.pop('config')
+        else:
+            config = ModelConfig.load_config(path_or_repo, local=local)
         config.tie_word_embeddings = True
-        
-        return super().from_pretrained(
-            path_or_repo, 
-            mesh=mesh, 
-            sharding_rules=sharding_rules, 
-            local=local, 
-            config=config
-        )
-    
 
-class Gemma2(TransformerLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+        return super().from_pretrained(
+            path_or_repo,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            local=local,
+            config=config,
+            **kwargs,
+        )
+
+
+class Gemma2(TransformerCausalLM):
+    def __init__(
+        self,
+        config,
+        rngs: nn.Rngs = None,
+        mesh=None,
+        sharding_rules=None,
+    ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
+        config.tie_word_embeddings = True
+        if getattr(config, 'layer_types', None) is None:
+            config.layer_types = [
+                (
+                    'sliding_attention'
+                    if (layer_idx + 1) % 2
+                    else 'full_attention'
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        super().__init__(
+            config,
+            rngs=rngs,
+            embedding=GemmaTextScaledWordEmbedding,
+            decoder=Gemma2DecoderLayer,
+            norm=GemmaRMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+        )
+        self.final_logit_softcapping = getattr(
+            config,
+            'final_logit_softcapping',
+            None,
+        )
+
+    def __call__(self, x, attention_mask=None, ctx=None):
+        logits, ctx = super().__call__(
+            x,
+            attention_mask=attention_mask,
+            ctx=ctx,
+        )
+        if self.final_logit_softcapping is not None:
+            cap = self.final_logit_softcapping
+            logits = cap * jnp.tanh(logits / cap)
+        return logits, ctx
 
 
 class Gemma3(TransformerMM):

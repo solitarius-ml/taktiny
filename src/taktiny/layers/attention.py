@@ -60,6 +60,9 @@ class Attention(nn.Module):
         self.context_dim = hidden_size if context_dim is None else context_dim
         self.use_qkv_norm = use_qkv_norm
         self.window_size = window_size
+        self.scaling = scaling
+        self.softcap = softcap
+        self.dropout = dropout
         
         # For Grouped Query Attention (GQA)
         self.num_kv_groups = self.num_heads // self.num_kv_heads
@@ -145,30 +148,81 @@ class Attention(nn.Module):
             if self.window_size is not None:
                 q_len = q.shape[1]
                 k_len = k.shape[1]
-                
-                # Standard causal mask
-                causal_mask = jnp.tril(jnp.ones((q_len, k_len), dtype=jnp.bool_))
-                
-                # Window mask
-                window_mask = jnp.triu(jnp.ones((q_len, k_len), dtype=jnp.bool_), k=-self.window_size + 1)
-                
+
+                query_start = (
+                    jnp.asarray(0, dtype=jnp.int32)
+                    if position_idx is None
+                    else jnp.asarray(position_idx, dtype=jnp.int32)
+                )
+                query_positions = (
+                    query_start + jnp.arange(q_len, dtype=jnp.int32)
+                )
+
+                # Cached keys use absolute positions from the start of the
+                # sequence. Uncached keys belong to the same local chunk as Q.
+                key_start = (
+                    jnp.asarray(0, dtype=jnp.int32)
+                    if kv_cache is not None
+                    else query_start
+                )
+                key_positions = key_start + jnp.arange(
+                    k_len, dtype=jnp.int32
+                )
+
+                causal_mask = (
+                    key_positions[None, :] <= query_positions[:, None]
+                )
+                window_mask = key_positions[None, :] >= (
+                    query_positions[:, None] - self.window_size + 1
+                )
                 sliding_mask = causal_mask & window_mask
-                
+
                 if attention_mask is not None:
                     attention_mask = attention_mask & sliding_mask
                 else:
                     attention_mask = sliding_mask
-                
-                # Turn off dot_product_attention's internal causal since we handle it manually
+
+                # The absolute-position mask handles causality itself.
                 is_causal = False
             
+        attention_bias = None
+        if self.softcap is not None:
+            scale = (
+                self.scaling
+                if self.scaling is not None
+                else self.head_dim ** -0.5
+            )
+            batch_size, query_length, _, _ = q.shape
+            key_length = k.shape[1]
+            grouped_q = q.reshape(
+                batch_size,
+                query_length,
+                self.num_kv_heads,
+                self.num_kv_groups,
+                self.head_dim,
+            )
+            scores = jnp.einsum(
+                'btkgh,bskh->bkgts',
+                grouped_q,
+                k,
+            ) * scale
+            capped_scores = self.softcap * jnp.tanh(scores / self.softcap)
+            attention_bias = (capped_scores - scores).reshape(
+                batch_size,
+                self.num_heads,
+                query_length,
+                key_length,
+            )
+
         # JAX's dot_product_attention natively handles GQA (num_kv_heads < num_heads)!
         # It expects shape [Batch, SeqLen, Heads, HeadDim] for query, key, and value.
         out = jax.nn.dot_product_attention(
             query=q, 
             key=k, 
             value=v, 
+            bias=attention_bias,
             mask=attention_mask,
+            scale=self.scaling,
             is_causal=is_causal
         )
         

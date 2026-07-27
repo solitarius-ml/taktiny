@@ -15,33 +15,30 @@
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes._common import TransformerLM
-from taktiny import nn
+from taktiny.cosettes._common import TransformerCausalLM
 
 
-class Deepseek(TransformerLM):
+class Deepseek(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
-class DeepseekV2(TransformerLM):
+class DeepseekV2(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
-class DeepseekV3(TransformerLM):
+class DeepseekV3(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
-class DeepseekV3_2(TransformerLM):
+class DeepseekV3_2(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
-class DeepseekV4(TransformerLM):
+class DeepseekV4(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
