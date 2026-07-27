@@ -1,144 +1,48 @@
 # Taktiny
 
-**Taktiny** is a boutique, object-oriented neural network framework and universal training engine built natively on top of JAX. 
+Taktiny is an experimental neural-network library built directly on JAX. It
+provides object-oriented modules that remain valid JAX PyTrees, a small set of
+transformer building blocks, and `Maestro` for loading compatible Hugging Face
+checkpoints into native Taktiny models.
 
-It provides an intuitive, stateful design where models encapsulate their own weights while leveraging the lightning-fast, purely functional compilation of JAX. Every `taktiny.nn.Module` and `Parameter` is a natively registered PyTree, allowing stateful objects to compile flawlessly with `jax.jit` and `optax`.
+The project is under active development. APIs, checkpoint mappings, and model
+coverage may change between revisions.
 
-## ✨ Features
-- **Boutique Architecture**: A meticulously handcrafted framework featuring a unique, cohesive orchestrator aesthetic (`Maestro`, `Repertoire`, and `cosettes/`).
-- **Object-Oriented JAX**: Build models using stateful `nn.Module` and `Parameter` classes without manually separating parameters from architecture.
-- **🎼 Maestro & Repertoire**: A powerful HuggingFace auto-model loader. Seamlessly load, quantize (int4/int8/fp8), and automatically shard masterpieces from the `Repertoire` (like LLaMA and Qwen) over any JAX Mesh configuration.
-- **Dynamic Configs**: Fluid and adaptable configurations. Taktiny elegantly parses raw Hugging Face JSON architectures directly into dynamic Python objects.
-- **Universal Trainer**: A polished, generic `Trainer` engine that can train models natively across multiple JAX-based frameworks.
+## Highlights
 
-## 🏗️ Building Modules
+- Stateful `nn.Module` and `nn.Parameter` objects registered as JAX PyTrees
+- Native support for `jax.jit`, `jax.value_and_grad`, and Optax
+- Safetensors checkpoint loading and saving
+- Abstract model construction through `jax.eval_shape`
+- Reusable transformer decoder, model, and causal-LM components
+- KV-cached autoregressive generation
+- Logical parameter axes and optional JAX mesh sharding
+- Experimental quantized linear layers and LoRA utilities
 
-`taktiny` embraces an **Object-Oriented** philosophy. Parameters are stored directly inside the class using `nn.Parameter`. Because `nn.Module` is a registered JAX PyTree, JAX functions (like `jax.jit` or `jax.value_and_grad`) understand the objects natively.
+## Requirements
 
-```python
-import jax
-import jax.numpy as jnp
-from taktiny import nn
+- Python 3.11 or newer
+- JAX 0.10.2 or newer
 
-class SimpleMLP(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features, rngs: nn.Rngs):
-        self.fc1 = nn.Linear(in_features, hidden_features, rngs=rngs)
-        self.fc2 = nn.Linear(hidden_features, out_features, rngs=rngs)
 
-    def __call__(self, x):
-        x = self.fc1(x)
-        x = jax.nn.relu(x)
-        x = self.fc2(x)
-        return x
+## Quick Start
 
-# Initialize with a random seed generator
-rngs = nn.Rngs(42)
-model = SimpleMLP(in_features=64, hidden_features=128, out_features=10, rngs=rngs)
+The following example loads a Qwen2 checkpoint and generates text:
 
-# State management for saving and checkpointing
-state_dict = model.state_dict() # or model.flat_state_dict()
-model.load_state_dict(state_dict)
-```
-
-## 🎼 Maestro: HuggingFace & Quantization
-
-Taktiny includes **Maestro**, an intelligent model loader that can pull HuggingFace repositories, match them against the registered **Repertoire**, and instantiate the equivalent Taktiny native architectures (the `opus`). Maestro also supports native dynamic quantization (INT4, INT8, FP8) on-the-fly during load time.
-
-```python
-import jax
-from jax.sharding import Mesh
-from taktiny import Maestro
-
-# 1. Define your hardware mesh (e.g., for Tensor Parallelism)
-mesh = Mesh(jax.devices(), ('dp', 'tp'))
-
-# 2. Let Maestro download, quantize, and shard the weights dynamically
-model = Maestro.from_pretrained(
-    "HuggingFaceTB/SmolLM2-135M-Instruct", 
-    dtype="int4", # Dynamically quantize weights to INT4 
-    mesh=mesh     # Distribute weights according to the mesh
-)
-
-print("Model successfully loaded and sharded!")
-```
-
-## 🧠 The Universal Trainer
-
-The `Trainer` class is designed to train neural networks robustly. When initialized, it automatically inspects the model and internally handles parameter extraction and state updates. This allows it to train models from native `taktiny` or external JAX frameworks (such as `flax.linen`, `flax.nnx`, or `equinox`).
-
-You can customize training with `TrainingConfig` (which supports setting maximum steps, learning rates, epochs, and Optax optimizers) and pass any standard data iterable to the `DatasetConfig`.
-
-```python
-import optax
-from taktiny.trainer import Trainer, TrainingConfig, DatasetConfig
-
-trainer = Trainer(
-    model=model,
-    loss_fn=my_loss_function,
-    training_config=TrainingConfig(
-        epochs=5,
-        max_steps=2000,
-        learning_rate=1e-3,
-        optimizer=optax.adamw(1e-3),
-        log_interval=50
-    ),
-    dataset_config=DatasetConfig(dataloader=my_batch_generator)
-)
-
-trainer.train()
-```
-The trainer provides a gorgeous `rich` progress bar in the terminal, complete with time-per-step tracking!
-
-## 🚀 Quick Start
-<!-- 
-```python
-import jax.numpy as jnp
-from taktiny import Rngs
-from taktiny.recipes import CNNModelConfig, Autoencoder
-from taktiny.trainer import Trainer, TrainingConfig, DatasetConfig
-
-# 1. Initialize a Stateful Model from the Zoo
-config = CNNModelConfig(in_channels=3, dims=[64, 128], latent_dim=32)
-model = Autoencoder(config, rngs=Rngs(42))
-
-# 2. Define a standard Loss Function
-def mse_loss(params, batch):
-    reconstructed, _ = params(batch)
-    return jnp.mean((reconstructed - batch) ** 2)
-
-# 3. Train!
-trainer = Trainer(
-    model=model,
-    loss_fn=mse_loss,
-    training_config=TrainingConfig(max_steps=1000),
-    dataset_config=DatasetConfig(dataloader=my_batch_generator)
-)
-trainer.train()
-``` -->
 ```python
 from taktiny import Maestro
 from transformers import AutoTokenizer
-import jax.numpy as jnp
 
-# currently supports
-# - llama (under 4)
-# - qwen 2
-# - gemma (first gemma)
-repo = 'google/gemma-2b-it'
+repo = "Qwen/Qwen2.5-0.5B"
 
-print("Loading tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(repo)
-
-print("Loading model...")
 model = Maestro.from_pretrained(repo)
 
-prompt = "Once upon a time\n"
-print(f"\nPrompt: {prompt}")
+input_ids = tokenizer.encode(
+    "Once upon a time",
+    return_tensors="np",
+)
 
-input_ids = tokenizer.encode(prompt, return_tensors='np')
-input_ids = jnp.array(input_ids)
-
-print("Generating...")
 output_ids = model.generate(
     input_ids,
     max_new_tokens=50,
@@ -146,7 +50,199 @@ output_ids = model.generate(
     top_p=0.9,
 )
 
-output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-print(f"\nOutput:\n{output_text}")
-
+print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
 ```
+
+Model loading and generation materialize checkpoint parameters and KV caches.
+Choose a checkpoint and dtype that fit the available device and host memory.
+
+## Implemented Architectures
+
+| Hugging Face architecture | Taktiny class | Status |
+| --- | --- | --- |
+| `LlamaForCausalLM` | `Llama` | Implemented |
+| `Qwen2ForCausalLM` | `Qwen2` | Implemented |
+| `GemmaForCausalLM` | `Gemma` | Implemented |
+
+Other architecture names may appear in the internal repertoire as development
+placeholders. Registration alone does not mean that checkpoint loading or
+inference is implemented.
+
+You can inspect the architecture registry with:
+
+```python
+from taktiny import Maestro
+
+print(Maestro.available())
+```
+
+## Inspecting Shapes
+
+`Maestro.eval_shape` constructs an abstract model from repository
+configuration without allocating parameter buffers or downloading checkpoint
+weights:
+
+```python
+from taktiny import Maestro
+
+abstract_model = Maestro.eval_shape("Qwen/Qwen2.5-0.5B")
+print(abstract_model)
+```
+
+This is useful for inspecting parameter counts, shapes, and dtypes before
+loading a checkpoint. It does not estimate temporary compilation memory or KV
+cache usage.
+
+## Building Modules
+
+Taktiny modules keep parameters directly on the object while participating in
+JAX transformations:
+
+```python
+import jax
+
+from taktiny import nn
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        out_features: int,
+        *,
+        rngs: nn.Rngs,
+    ):
+        self.input = nn.Linear(
+            in_features,
+            hidden_features,
+            rngs=rngs,
+        )
+        self.output = nn.Linear(
+            hidden_features,
+            out_features,
+            rngs=rngs,
+        )
+
+    def __call__(self, x):
+        return self.output(jax.nn.silu(self.input(x)))
+
+
+model = MLP(64, 128, 10, rngs=nn.Rngs(42))
+jitted_model = jax.jit(model)
+```
+
+Parameters can be inspected or restored through flat and nested state
+dictionaries:
+
+```python
+flat_state = model.flat_state_dict()
+state = model.state_dict()
+
+model.load_state_dict(state)
+```
+
+Models derived from `PretrainedModel` can also write Safetensors checkpoints:
+
+```python
+model.save_pretrained("./checkpoint")
+```
+
+## Defining A Transformer Family
+
+`TransformerDecoderLayer` creates modules in the order supplied by the family
+implementation. Normalization modules transform the active hidden state;
+attention and MLP modules are applied as residual branches.
+
+```python
+from taktiny import nn
+from taktiny.cosettes._common import (
+    TransformerCausalLM,
+    TransformerDecoderLayer,
+)
+from taktiny.layers import Attention, GateMLP
+
+
+class ExampleDecoderLayer(TransformerDecoderLayer):
+    def __init__(self, config, rngs: nn.Rngs):
+        super().__init__(
+            config,
+            rngs=rngs,
+            input_layernorm=nn.RMSNorm,
+            self_attn=Attention,
+            post_attention_layernorm=nn.RMSNorm,
+            mlp=GateMLP,
+        )
+
+
+class ExampleForCausalLM(TransformerCausalLM):
+    def __init__(
+        self,
+        config,
+        rngs: nn.Rngs = None,
+        mesh=None,
+        sharding_rules=None,
+    ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=ExampleDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+        )
+```
+
+Checkpoint-facing attribute names such as `self_attn`, `input_layernorm`, and
+`mlp` should match the source checkpoint wherever possible. This minimizes
+weight-mapping rules.
+
+## Training
+
+The experimental `Trainer` accepts native Taktiny models and uses Optax for
+updates:
+
+```python
+import optax
+
+from taktiny import DatasetConfig, Trainer, TrainingConfig
+
+trainer = Trainer(
+    model=model,
+    loss_fn=loss_fn,
+    training_config=TrainingConfig(
+        epochs=1,
+        max_steps=1_000,
+        optimizer=optax.adamw(3e-4),
+        log_interval=10,
+        jit_compile=True,
+    ),
+    dataset_config=DatasetConfig(dataloader=train_batches),
+)
+
+trainer.train()
+```
+
+The trainer currently uses heuristic parameter freezing for large and
+quantized parameters. Review the trainable parameter set before using it for a
+real training run.
+
+## Project Layout
+
+```text
+src/taktiny/
+├── nn/                 Object-oriented JAX modules and parameters
+├── layers/             Attention, feed-forward, positional, and vision layers
+├── cosettes/           Reusable model implementations
+├── maestro/            Architecture registry and checkpoint orchestration
+├── trainer/            Experimental training utilities
+└── utils/              Sharding, quantization, typing, and weight mapping
+```
+
+## License
+
+Taktiny is distributed under the Apache License 2.0. See
+[`LICENSE.md`](LICENSE.md).
