@@ -78,6 +78,7 @@ class PretrainedModel(Module):
         """
         if dtype is not None:
             setattr(config, 'dtype', dtype)
+            setattr(config, 'torch_dtype', dtype)
 
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
@@ -116,34 +117,62 @@ class PretrainedModel(Module):
         else:
             files_to_load["model.safetensors"] = None
 
-        # 3. Instantiate model skeleton using eval_shape (no memory allocation)
+        # 3. Resolve every checkpoint file before materializing any parameters.
+        resolved_files = {}
+        for file_name in files_to_load:
+            if local:
+                resolved_files[file_name] = os.path.join(
+                    path_or_repo_str,
+                    subfolder if subfolder else "",
+                    file_name,
+                )
+            else:
+                resolved_files[file_name] = hf_hub_download(
+                    repo_id=path_or_repo_str,
+                    subfolder=subfolder,
+                    filename=file_name,
+                )
+
+        # 4. Instantiate model skeleton using eval_shape (no memory allocation)
         rngs = kwargs.get('rngs', Rngs(0))
         state = jax.eval_shape(lambda: cls(config, rngs=rngs, mesh=mesh, sharding_rules=sharding_rules))
         current_state_dict = state.flat_parameter_dict()
         new_state = {}
         not_found_some = False
 
-        # 4. Load weights
+        # 5. Load weights
         import re
         import numpy as np
         from safetensors import safe_open
+        from ..utils.weights import map_state_dict
+
         stacked_states = {}
+        grouped_mapping = any(
+            len(rule) == 3
+            and isinstance(rule[0], (list, tuple))
+            and len(rule[0]) > 1
+            for rule in module_map
+        )
 
         for file_name, keys_in_file in files_to_load.items():
-            if local:
-                shard_path = os.path.join(path_or_repo_str, subfolder if subfolder else "", file_name)
-            else:
-                shard_path = hf_hub_download(repo_id=path_or_repo_str, subfolder=subfolder, filename=file_name)
-                
+            shard_path = resolved_files[file_name]
             with safe_open(shard_path, framework="np", device="cpu") as f:
                 keys_to_process = keys_in_file if keys_in_file is not None else f.keys()
-                
-                shard_dict = {k: f.get_tensor(k) for k in keys_to_process}
-                
-                from ..utils.weights import map_state_dict
-                mapped_shard = map_state_dict(shard_dict, module_map)
-                
-                for k_mapped, value in mapped_shard.items():
+
+                if grouped_mapping:
+                    shard = {key: f.get_tensor(key) for key in keys_to_process}
+                    mapped_items = map_state_dict(shard, module_map).items()
+                else:
+                    mapped_items = (
+                        item
+                        for key in keys_to_process
+                        for item in map_state_dict(
+                            {key: f.get_tensor(key)},
+                            module_map,
+                        ).items()
+                    )
+
+                for k_mapped, value in mapped_items:
                     if k_mapped in current_state_dict:
                         target_var = current_state_dict[k_mapped]
                         
@@ -152,6 +181,10 @@ class PretrainedModel(Module):
                                 value = value.T
                         if value.shape != target_var.shape:
                             value = value.reshape(target_var.shape)
+
+                        target_dtype = np.dtype(target_var.dtype)
+                        if value.dtype != target_dtype:
+                            value = value.astype(target_dtype, copy=False)
                             
                         sharding = getattr(target_var, "sharding", None)
                         if sharding is None and getattr(target_var, "axis_names", None) is not None and mesh is not None:
@@ -308,7 +341,17 @@ class PretrainedModel(Module):
             print("You can try to map module names using module_map.")
             print("e.g. module_map = {'target_module': 'name_to_change'}")
 
-        # 5. Inject actual arrays into the PyTree skeleton
+        missing_parameters = sorted(set(current_state_dict) - set(new_state))
+        if missing_parameters:
+            preview = ', '.join(missing_parameters[:8])
+            if len(missing_parameters) > 8:
+                preview += f', ... ({len(missing_parameters)} total)'
+            raise ValueError(
+                'Checkpoint did not provide values for model parameters: '
+                f'{preview}'
+            )
+
+        # 6. Inject actual arrays into the PyTree skeleton
         state.load_flat_state_dict(new_state)
         return state
     

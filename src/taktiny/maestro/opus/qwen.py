@@ -18,18 +18,13 @@ from __future__ import annotations
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes._common import (
     TransformerCausalLM,
-    TransformerLM,
     TransformerMM,
 )
-from taktiny.cosettes.transformers.qwen import (
-    QwenDecoder,
-    Qwen2DecoderLayer,
-    Qwen3Decoder,
-)
+from taktiny.cosettes.transformers.qwen import Qwen2DecoderLayer
 from taktiny import nn
 
 
-class Qwen(TransformerLM):
+class Qwen(TransformerCausalLM):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
@@ -54,17 +49,17 @@ class Qwen2(TransformerCausalLM):
         )
 
 
-class Qwen3(TransformerLM):
+class Qwen3(TransformerCausalLM):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
-class Qwen3MoE(TransformerLM):
+class Qwen3MoE(TransformerCausalLM):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
-class Qwen3Next(TransformerLM):
+class Qwen3Next(TransformerCausalLM):
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 

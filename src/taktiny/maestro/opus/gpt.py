@@ -15,14 +15,11 @@
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes._common import TransformerLM
-from taktiny import nn
+from taktiny.cosettes._common import TransformerCausalLM
 
 
-class GPTOSS(TransformerLM):
+class GPTOSS(TransformerCausalLM):
     def __init__(self):
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
