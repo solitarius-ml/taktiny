@@ -25,6 +25,17 @@ from taktiny.nn import Module, Rngs
 
 
 class PretrainedModel(Module):
+    """Base class for models that load and save pretrained checkpoints.
+
+    Models are serialized as Safetensors together with a weight index. Loading
+    first constructs an abstract parameter tree with ``jax.eval_shape``, then
+    maps checkpoint names to module paths, applies any requested quantization,
+    and places arrays using parameter sharding metadata.
+
+    Subclasses are expected to accept ``config`` and ``rngs`` in their
+    constructor. They may provide module-mapping rules to translate external
+    checkpoint names and may expose default logical sharding rules.
+    """
 
     def save_pretrained(self, path):
         """
@@ -301,4 +312,3 @@ class PretrainedModel(Module):
         state.load_flat_state_dict(new_state)
         return state
     
-

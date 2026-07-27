@@ -16,31 +16,35 @@
 from __future__ import annotations
 
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes._common import TransformerLM, TransformerMM
-from taktiny.cosettes.transformers.llama import LlamaDecoder
+from taktiny.cosettes._common import TransformerCausalLM, TransformerMM
+from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
 from taktiny import nn
 
 
-class Llama(TransformerLM):
+class Llama(TransformerCausalLM):
     def __init__(
-        self, 
-        config, 
-        rngs: nn.Rngs = None, 
-        mesh=None, 
-        sharding_rules=None
+        self,
+        config,
+        rngs: nn.Rngs = None,
+        mesh=None,
+        sharding_rules=None,
     ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
         super().__init__(
-            LlamaDecoder,
-            config=config,
-            rngs=rngs, 
-            mesh=mesh, 
-            sharding_rules=sharding_rules
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
         )
 
 
 class Llama4(TransformerMM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
 repertoire.register('LlamaForCausalLM', Llama)

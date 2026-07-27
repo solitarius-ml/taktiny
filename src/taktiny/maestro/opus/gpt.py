@@ -24,7 +24,7 @@ from taktiny import nn
 
 class GPTOSS(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
 repertoire.register('GptOssForCausalLM', GPTOSS)

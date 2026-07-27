@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
+from taktiny.cosettes._common import TransformerDecoderLayer
 from taktiny.layers import RotaryEmbedding, GateMLP, Attention
 from taktiny.utils.typing import ShardMode
 
@@ -129,10 +130,42 @@ class Qwen2Decoder(nn.Module):
         return x, new_cache
 
 
+class Qwen2Attention(Attention):
+    """Qwen2 attention with bias on Q/K/V projections only."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.update(
+            bias=False,
+            q_bias=True,
+            k_bias=True,
+            v_bias=True,
+            o_bias=False,
+        )
+        super().__init__(*args, **kwargs)
+
+
+class Qwen2DecoderLayer(TransformerDecoderLayer):
+    def __init__(self, config, rngs: nn.Rngs):
+        super().__init__(
+            config,
+            rngs=rngs,
+            input_layernorm=nn.RMSNorm,
+            self_attn=Qwen2Attention,
+            post_attention_layernorm=nn.RMSNorm,
+            mlp=GateMLP,
+        )
+
+
 class Qwen3Decoder(nn.Module):
     pass
 
 
 Qwen2TransformerBlock = Qwen2Decoder
 
-__all__ = ['QwenDecoder', 'Qwen2Decoder', 'Qwen3Decoder']
+__all__ = [
+    'QwenDecoder',
+    'Qwen2Decoder',
+    'Qwen2Attention',
+    'Qwen2DecoderLayer',
+    'Qwen3Decoder',
+]

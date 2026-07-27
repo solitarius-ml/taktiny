@@ -21,8 +21,12 @@ class Repertoire:
         self._classes = set()
 
     def register(self, key, cls):
-        if cls in self._classes:
-            raise ValueError(f'Architecture registration governs many-to-one. found duplicated for {cls.__name__}')
+        registered = self._repertoire.get(key)
+        if registered is not None and registered is not cls:
+            raise ValueError(
+                f'Architecture {key} is already registered to '
+                f'{registered.__name__}'
+            )
 
         self._classes.add(cls)
         self._repertoire[key] = cls

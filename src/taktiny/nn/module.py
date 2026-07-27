@@ -17,13 +17,32 @@ import jax
 import operator
 from jax.tree_util import register_pytree_node_class
 
+def _format_scaled(value, scale, suffix):
+    number = f"{value / scale:.2f}".rstrip('0').rstrip('.')
+    return f"{number}{suffix}"
+
+def format_params(size):
+    for scale, suffix in (
+        (1_000_000_000_000, 'T'),
+        (1_000_000_000, 'B'),
+        (1_000_000, 'M'),
+        (1_000, 'K'),
+    ):
+        if size >= scale:
+            return _format_scaled(size, scale, suffix)
+    return f"{size:,}"
+
 def format_bytes(size):
-    if size < 1024:
-        return f"{size} B"
-    elif size < 1024**2:
-        return f"{size / 1024:.2f} KB".rstrip('0').rstrip('.').replace('.00', '')
-    else:
-        return f"{size / (1024**2):.2f} MB".rstrip('0').rstrip('.').replace('.00', '')
+    for scale, suffix in (
+        (1024**4, 'TB'),
+        (1024**3, 'GB'),
+        (1024**2, 'MB'),
+        (1024, 'KB'),
+    ):
+        if size >= scale:
+            number = f"{size / scale:.2f}".rstrip('0').rstrip('.')
+            return f"{number} {suffix}"
+    return f"{int(size)} B"
 
 def format_dtype(dtype):
     name = dtype.name
@@ -55,8 +74,11 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
     if isinstance(obj, Parameter):
         p = obj.value.size
         b = 0.0
-        if hasattr(obj.value, 'itemsize'):
-            b = obj.value.size * obj.value.itemsize
+        itemsize = getattr(obj.value, 'itemsize', None)
+        if itemsize is None:
+            itemsize = getattr(obj.value.dtype, 'itemsize', None)
+        if itemsize is not None:
+            b = obj.value.size * itemsize
 
         dt = format_dtype(obj.value.dtype)
         sh = ", ".join(map(str, obj.value.shape))
@@ -78,9 +100,13 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
         title = f"{obj.__class__.__name__}({extra})" if extra else obj.__class__.__name__
         
         if is_root:
-            node_str = f"{title} ({total_params} parameters, {format_bytes(total_bytes)})"
+            node_str = f"{title} ({format_params(total_params)} parameters, {format_bytes(total_bytes)})"
         else:
-            node_str = f"{current_prefix}{name}: {title} ({total_params} parameters, {format_bytes(total_bytes)})"
+            node_str = (
+                f"{current_prefix}{name}: {title} "
+                f"({format_params(total_params)} parameters, "
+                f"{format_bytes(total_bytes)})"
+            )
             
         lines.insert(0, node_str)
         lines.extend(child_lines)

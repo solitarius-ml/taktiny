@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from typing import Optional
 
 from taktiny import nn
 from taktiny.layers.posemb import RotaryEmbedding
@@ -37,14 +38,17 @@ class Attention(nn.Module):
         dtype: DType | str = None,
         window_size: int = None,
         rngs: nn.Rngs = None,
-        q_axis_names: tuple[str | None, ...] | None = None,
-        k_axis_names: tuple[str | None, ...] | None = None,
-        v_axis_names: tuple[str | None, ...] | None = None,
-        o_axis_names: tuple[str | None, ...] | None = None,
-        q_bias: bool = None,
-        k_bias: bool = None,
-        v_bias: bool = None,
-        o_bias: bool = None,
+        q_axis_names: Optional[tuple[str | None, ...]] = None,
+        k_axis_names: Optional[tuple[str | None, ...]] = None,
+        v_axis_names: Optional[tuple[str | None, ...]] = None,
+        o_axis_names: Optional[tuple[str | None, ...]] = None,
+        q_bias: Optional[bool] = None,
+        k_bias: Optional[bool] = None,
+        v_bias: Optional[bool] = None,
+        o_bias: Optional[bool] = None,
+        scaling: Optional[float] = None,
+        softcap: Optional[float] = None,
+        dropout: float | int = 0.0,
         shard_mode: ShardMode = ShardMode.AUTO,
         quant=None,
         dot_general=None,

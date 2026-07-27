@@ -24,26 +24,26 @@ from taktiny import nn
 
 class Deepseek(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class DeepseekV2(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 class DeepseekV3(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
 class DeepseekV3_2(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class DeepseekV4(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 repertoire.register('DeepseekForCausalLM', Deepseek)

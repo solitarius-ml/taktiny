@@ -19,8 +19,11 @@ if implemented in this library.
 from __future__ import annotations
 
 from taktiny.maestro import opus
+from taktiny.maestro._config import ModelConfig
 from taktiny.maestro._livret import repertoire
+from taktiny.nn import Rngs
 
+import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 from huggingface_hub import hf_hub_download
@@ -86,6 +89,57 @@ class Maestro:
             sharding_rules=sharding_rules, 
             local=local,
             **kwargs
+        )
+
+    @classmethod
+    def eval_shape(
+        cls,
+        repo_or_path,
+        mesh=None,
+        sharding_rules=None,
+        local=False,
+        **kwargs,
+    ):
+        config = kwargs.pop('config', None)
+        if config is None:
+            config = ModelConfig.load_config(repo_or_path, local=local)
+        if config is None:
+            raise ValueError(f'Unable to load config from {repo_or_path}')
+
+        architectures = getattr(config, 'architectures', None) or []
+        if len(architectures) != 1:
+            raise ValueError(
+                'Expected config.architectures to contain exactly one architecture'
+            )
+
+        architecture = architectures[0]
+        if not repertoire.get(architecture):
+            raise NotImplementedError(
+                f'Unsupported architecture: {architecture}'
+            )
+        model_cls = repertoire.get(architecture)
+
+        if isinstance(mesh, dict):
+            axis_names = tuple(mesh)
+            shape = tuple(mesh.values())
+            devices = mesh_utils.create_device_mesh(shape)
+            mesh = Mesh(devices, axis_names)
+
+        if sharding_rules is None and hasattr(model_cls, 'default_sharding_rules'):
+            sharding_rules = model_cls.default_sharding_rules
+
+        rngs = kwargs.pop('rngs', None)
+        if rngs is None:
+            rngs = Rngs(0)
+
+        return jax.eval_shape(
+            lambda: model_cls(
+                config,
+                rngs=rngs,
+                mesh=mesh,
+                sharding_rules=sharding_rules,
+                **kwargs,
+            )
         )
 
 

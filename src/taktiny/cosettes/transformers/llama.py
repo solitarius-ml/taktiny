@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from taktiny import nn
+from taktiny.cosettes._common import TransformerDecoderLayer
 from taktiny.utils.typing import ShardMode
 from taktiny.layers import RotaryEmbedding, GateMLP, Attention
 
@@ -132,4 +133,17 @@ class LlamaDecoder(nn.Module):
 
 LlamaTransformerBlock = LlamaDecoder
 
-__all__ = ['LlamaDecoder']
+
+class LlamaDecoderLayer(TransformerDecoderLayer):
+    def __init__(self, config, rngs: nn.Rngs):
+        super().__init__(
+            config,
+            rngs=rngs,
+            input_layernorm=nn.RMSNorm,
+            self_attn=Attention,
+            post_attention_layernorm=nn.RMSNorm,
+            mlp=GateMLP,
+        )
+
+
+__all__ = ['LlamaDecoder', 'LlamaDecoderLayer']

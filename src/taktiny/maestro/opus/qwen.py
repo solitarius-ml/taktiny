@@ -16,49 +16,62 @@
 from __future__ import annotations
 
 from taktiny.maestro._livret import repertoire
-from taktiny.cosettes._common import TransformerLM, TransformerMM
-from taktiny.cosettes.transformers.qwen import QwenDecoder, Qwen2Decoder, Qwen3Decoder
+from taktiny.cosettes._common import (
+    TransformerCausalLM,
+    TransformerLM,
+    TransformerMM,
+)
+from taktiny.cosettes.transformers.qwen import (
+    QwenDecoder,
+    Qwen2DecoderLayer,
+    Qwen3Decoder,
+)
 from taktiny import nn
 
 
 class Qwen(TransformerLM):
     def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
-class Qwen2(TransformerLM):
+class Qwen2(TransformerCausalLM):
     def __init__(
-        self, config, 
-        rngs: nn.Rngs = None, 
-        mesh=None, 
-        sharding_rules=None
+        self,
+        config,
+        rngs: nn.Rngs = None,
+        mesh=None,
+        sharding_rules=None,
     ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
         super().__init__(
-            Qwen2Decoder,
-            config=config,
+            config,
             rngs=rngs,
+            decoder=Qwen2DecoderLayer,
+            norm=nn.RMSNorm,
             mesh=mesh,
-            sharding_rules=sharding_rules
+            sharding_rules=sharding_rules,
         )
 
 
 class Qwen3(TransformerLM):
     def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
     
 
 class Qwen3MoE(TransformerLM):
     def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class Qwen3Next(TransformerLM):
     def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class Qwen3HMoE(TransformerMM):
     def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 repertoire.register('QwenForCausalLM', Qwen)

@@ -70,31 +70,32 @@ class Gemma(TransformerLM):
 
 class Gemma2(TransformerLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class Gemma3(TransformerMM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class Gemma4(TransformerMM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class Gemma4Unified(TransformerMM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class DiffusionGemma(DiffusionLM):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__name__}.')
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 repertoire.register('GemmaForCausalLM', Gemma)
 repertoire.register('Gemma2ForCausalLM', Gemma2)
+repertoire.register('Gemma3ForCausalLM', Gemma3)
 repertoire.register('Gemma3ForConditionalGeneration', Gemma3)
 repertoire.register('Gemma4ForConditionalGeneration', Gemma4)
 repertoire.register('Gemma4UnifiedForConditionalGeneration', Gemma4Unified)
