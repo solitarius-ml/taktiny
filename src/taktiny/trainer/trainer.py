@@ -59,15 +59,34 @@ def _parameter_labels(params):
     )
 
 
-def _stop_gradient_frozen(params, labels):
-    return jax.tree.map(
+def _partition_params(params, labels):
+    trainable = jax.tree.map(
         lambda value, label: (
-            value
-            if label == 'trainable'
-            else jax.lax.stop_gradient(value)
+            value if label == 'trainable' else None
         ),
         params,
         labels,
+    )
+    frozen = jax.tree.map(
+        lambda value, label: (
+            None if label == 'trainable' else value
+        ),
+        params,
+        labels,
+    )
+    return trainable, frozen
+
+
+def _combine_params(trainable, frozen):
+    return jax.tree.map(
+        lambda trainable_value, frozen_value: (
+            frozen_value
+            if trainable_value is None
+            else trainable_value
+        ),
+        trainable,
+        frozen,
+        is_leaf=lambda value: value is None,
     )
 
 
@@ -166,19 +185,15 @@ class Trainer:
         else:
             raise ValueError("Unsupported model type")
             
-    def _setup_optimizer(self, params, labels):
-        """Configure an optimizer using explicit trainability labels."""
+    def _setup_optimizer(self, params):
+        """Configure an optimizer for the trainable parameter partition."""
         base_opt = self.training_config.optimizer
         if base_opt is None:
             base_opt = optax.adamw(
                 self.training_config.learning_rate,
                 weight_decay=self.training_config.weight_decay,
             )
-
-        return optax.multi_transform(
-            {'trainable': base_opt, 'frozen': optax.set_to_zero()},
-            lambda _: labels,
-        )
+        return base_opt
 
     def _place_batch(self, batch):
         sharding = self.dataset_config.batch_sharding
@@ -219,29 +234,43 @@ class Trainer:
         )
         params = _place_unsharded(params, self._mesh)
         labels = _parameter_labels(params)
-        optimizer = self._setup_optimizer(params, labels)
-        opt_state = optimizer.init(params)
+        trainable_params, frozen_params = _partition_params(params, labels)
+        optimizer = self._setup_optimizer(trainable_params)
+        opt_state = optimizer.init(trainable_params)
         opt_state = _place_unsharded(
             opt_state,
             self._mesh,
         )
         
         # 2. Define train_step
-        def train_step(params, opt_state, batch):
-            def calculate_loss(current_params):
-                differentiable_params = _stop_gradient_frozen(
-                    current_params,
-                    labels,
+        def train_step(
+            current_trainable,
+            current_frozen,
+            opt_state,
+            batch,
+        ):
+            def calculate_loss(candidate_trainable):
+                current_params = _combine_params(
+                    candidate_trainable,
+                    current_frozen,
                 )
-                return self.loss_fn(differentiable_params, batch)
+                return self.loss_fn(current_params, batch)
 
             loss, grads = jax.value_and_grad(
                 calculate_loss,
                 allow_int=True,
-            )(params)
-            updates, new_opt_state = optimizer.update(grads, opt_state, params)
-            new_params = jax.tree.map(_apply_update, params, updates)
-            return new_params, new_opt_state, loss
+            )(current_trainable)
+            updates, new_opt_state = optimizer.update(
+                grads,
+                opt_state,
+                current_trainable,
+            )
+            new_trainable = jax.tree.map(
+                _apply_update,
+                current_trainable,
+                updates,
+            )
+            return new_trainable, new_opt_state, loss
 
         compiled_train_step = None
 
@@ -283,19 +312,22 @@ class Trainer:
                         compiled_train_step = jax.jit(
                             train_step,
                             in_shardings=(
-                                _tree_shardings(params),
+                                _tree_shardings(trainable_params),
+                                _tree_shardings(frozen_params),
                                 _tree_shardings(opt_state),
                                 _tree_shardings(batch),
                             ),
                             out_shardings=(
-                                _tree_shardings(params),
+                                _tree_shardings(trainable_params),
                                 _tree_shardings(opt_state),
                                 None,
                             ),
+                            donate_argnums=(0, 2),
                         )
                     step_fn = compiled_train_step or train_step
-                    params, opt_state, loss = step_fn(
-                        params,
+                    trainable_params, opt_state, loss = step_fn(
+                        trainable_params,
+                        frozen_params,
                         opt_state,
                         batch,
                     )
@@ -327,6 +359,7 @@ class Trainer:
             progress.update(task_id, completed=total_steps if total_steps else step, loss=float(loss))
                 
         # 4. Inject back into the object if needed
+        params = _combine_params(trainable_params, frozen_params)
         self._inject_params(params)
         console.print("[bold green]✨ Training complete![/bold green]")
         
