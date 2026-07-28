@@ -9,6 +9,66 @@ import numpy as np
 import optax
 
 
+def _tokenize_with_assistant_labels(
+    tokenizer,
+    prompt_messages,
+    full_messages,
+    *,
+    max_length,
+):
+    prompt_text = tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    full_text = tokenizer.apply_chat_template(
+        full_messages,
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+
+    if full_text.startswith(prompt_text):
+        try:
+            encoded = tokenizer(
+                full_text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            full_ids = list(encoded['input_ids'])
+            labels = [
+                token_id if end > len(prompt_text) else -100
+                for token_id, (_, end) in zip(
+                    full_ids,
+                    encoded['offset_mapping'],
+                    strict=True,
+                )
+            ]
+            return full_ids, labels
+        except (KeyError, NotImplementedError, TypeError, ValueError):
+            pass
+
+    prompt_ids = tokenizer.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+    full_ids = tokenizer.apply_chat_template(
+        full_messages,
+        tokenize=True,
+        add_generation_prompt=False,
+    )[:max_length]
+
+    prompt_length = 0
+    for prompt_id, full_id in zip(prompt_ids, full_ids):
+        if prompt_id != full_id:
+            break
+        prompt_length += 1
+    labels = [-100] * prompt_length + full_ids[prompt_length:]
+    return full_ids, labels
+
+
 def encode_open_thoughts_row(tokenizer, row, *, max_length):
     """Tokenize one OpenThoughts conversation with assistant-only labels."""
     turns = row['conversations']
@@ -31,25 +91,12 @@ def encode_open_thoughts_row(tokenizer, row, *, max_length):
         {'role': 'assistant', 'content': assistant_turn['value']}
     ]
 
-    prompt_ids = tokenizer.apply_chat_template(
+    full_ids, labels = _tokenize_with_assistant_labels(
+        tokenizer,
         prompt_messages,
-        tokenize=True,
-        add_generation_prompt=True,
-    )
-    full_ids = tokenizer.apply_chat_template(
         full_messages,
-        tokenize=True,
-        add_generation_prompt=False,
+        max_length=max_length,
     )
-    if full_ids[:len(prompt_ids)] != prompt_ids:
-        raise ValueError(
-            'Chat-template prompt is not a prefix of the full sample'
-        )
-    if len(prompt_ids) >= max_length:
-        return None
-
-    full_ids = full_ids[:max_length]
-    labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids):]
     if not any(label != -100 for label in labels):
         return None
     attention_mask = [1] * len(full_ids)
