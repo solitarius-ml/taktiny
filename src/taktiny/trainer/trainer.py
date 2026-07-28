@@ -15,30 +15,109 @@
 from __future__ import annotations
 
 import jax
+import qwix
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
+from taktiny.nn.module import Module, Parameter
 
 import jax.numpy as jnp
 import optax
 
-def _is_frozen(x):
-    """Heuristic to detect if a parameter should be frozen."""
-    if not hasattr(x, 'dtype') or not jnp.issubdtype(x.dtype, jnp.inexact):
-        return True
-    if x.dtype == getattr(jnp, 'float8_e4m3fn', None):
-        return True
-    # Freeze 1D arrays (LayerNorms, biases)
-    if len(x.shape) == 1:
-        return True
-    # Freeze massive matrices (like 2048x151936 embeddings/lm_head). LoRA matrices have small rank (<= 256).
-    if len(x.shape) == 2 and min(x.shape) > 256:
-        return True
-    return False
+def _is_trainable_value(value):
+    if isinstance(value, qwix.QArray):
+        return False
+    if not hasattr(value, 'dtype'):
+        return False
+    if not jnp.issubdtype(value.dtype, jnp.inexact):
+        return False
+    return value.dtype != getattr(jnp, 'float8_e4m3fn', None)
 
-def _safe_add(p, u):
-    """Safely apply updates only to trainable parameters."""
-    if _is_frozen(p):
-        return p
-    return p + u
+
+def _parameter_labels(params):
+    """Build Optax labels from explicit Taktiny parameter metadata."""
+    if not isinstance(params, Module):
+        return jax.tree.map(
+            lambda value: (
+                'trainable'
+                if _is_trainable_value(value)
+                else 'frozen'
+            ),
+            params,
+        )
+
+    def label_parameter(parameter):
+        trainable = (
+            getattr(parameter, 'trainable', True)
+            and _is_trainable_value(parameter.value)
+        )
+        label = 'trainable' if trainable else 'frozen'
+        return jax.tree.map(lambda _: label, parameter)
+
+    return jax.tree.map(
+        label_parameter,
+        params,
+        is_leaf=lambda value: isinstance(value, Parameter),
+    )
+
+
+def _stop_gradient_frozen(params, labels):
+    return jax.tree.map(
+        lambda value, label: (
+            value
+            if label == 'trainable'
+            else jax.lax.stop_gradient(value)
+        ),
+        params,
+        labels,
+    )
+
+
+def _apply_update(parameter, update):
+    if getattr(update, 'dtype', None) == jax.dtypes.float0:
+        return parameter
+    return parameter + update
+
+
+def _tree_shardings(tree):
+    return jax.tree.map(
+        lambda value: (
+            value.sharding if isinstance(value, jax.Array) else None
+        ),
+        tree,
+    )
+
+
+def _parameter_mesh(params):
+    for value in jax.tree.leaves(params):
+        sharding = getattr(value, 'sharding', None)
+        if isinstance(sharding, jax.sharding.NamedSharding):
+            return sharding.mesh
+    return None
+
+
+def _sharding_mesh(sharding):
+    for value in jax.tree.leaves(sharding):
+        if isinstance(value, jax.sharding.NamedSharding):
+            return value.mesh
+    return None
+
+
+def _place_unsharded(tree, mesh):
+    if mesh is None:
+        return tree
+
+    replicated = jax.sharding.NamedSharding(
+        mesh,
+        jax.sharding.PartitionSpec(),
+    )
+
+    def place(value):
+        if not isinstance(value, jax.Array):
+            return value
+        if isinstance(value.sharding, jax.sharding.NamedSharding):
+            return value
+        return jax.device_put(value, replicated)
+
+    return jax.tree.map(place, tree)
 
 class Trainer:
     def __init__(self, model, loss_fn, training_config: TrainingConfig, dataset_config: DatasetConfig):
@@ -47,10 +126,11 @@ class Trainer:
         self.training_config = training_config
         self.dataset_config = dataset_config
         self.model_type = self._diagnose_model_type(model)
+        self._mesh = None
         
     def _diagnose_model_type(self, model) -> str:
         # Detect Taktiny models
-        if hasattr(model, "__module__") and "taktiny" in model.__module__:
+        if isinstance(model, Module):
             return "taktiny"
             
         # Detect Flax NNX models
@@ -86,19 +166,41 @@ class Trainer:
         else:
             raise ValueError("Unsupported model type")
             
-    def _setup_optimizer(self):
-        """Configures the optimizer with auto-freezing for quantized/massive parameters."""
-        if self.training_config.optimizer is not None:
-            return self.training_config.optimizer
-            
-        base_opt = optax.adamw(self.training_config.learning_rate, weight_decay=self.training_config.weight_decay)
-        
-        def get_label(x):
-            return 'frozen' if _is_frozen(x) else 'trainable'
-            
+    def _setup_optimizer(self, params, labels):
+        """Configure an optimizer using explicit trainability labels."""
+        base_opt = self.training_config.optimizer
+        if base_opt is None:
+            base_opt = optax.adamw(
+                self.training_config.learning_rate,
+                weight_decay=self.training_config.weight_decay,
+            )
+
         return optax.multi_transform(
             {'trainable': base_opt, 'frozen': optax.set_to_zero()},
-            lambda p: jax.tree_util.tree_map(get_label, p)
+            lambda _: labels,
+        )
+
+    def _place_batch(self, batch):
+        sharding = self.dataset_config.batch_sharding
+        if sharding is None:
+            if self._mesh is None:
+                return batch
+            sharding = jax.sharding.NamedSharding(
+                self._mesh,
+                jax.sharding.PartitionSpec(),
+            )
+        if isinstance(sharding, jax.sharding.Sharding):
+            return jax.tree.map(
+                lambda value: jax.device_put(value, sharding),
+                batch,
+            )
+        return jax.tree.map(
+            lambda value, value_sharding: jax.device_put(
+                value,
+                value_sharding,
+            ),
+            batch,
+            sharding,
         )
             
     def train(self):
@@ -110,19 +212,38 @@ class Trainer:
         console.print(f"Epochs: [bold]{self.training_config.epochs}[/bold] | Max Steps: [bold]{self.training_config.max_steps}[/bold]")
         
         # 1. Initialize Optimizer
-        optimizer = self._setup_optimizer()
         params = self.extract_params()
+        self._mesh = (
+            _parameter_mesh(params)
+            or _sharding_mesh(self.dataset_config.batch_sharding)
+        )
+        params = _place_unsharded(params, self._mesh)
+        labels = _parameter_labels(params)
+        optimizer = self._setup_optimizer(params, labels)
         opt_state = optimizer.init(params)
+        opt_state = _place_unsharded(
+            opt_state,
+            self._mesh,
+        )
         
         # 2. Define train_step
         def train_step(params, opt_state, batch):
-            loss, grads = jax.value_and_grad(self.loss_fn, allow_int=True)(params, batch)
+            def calculate_loss(current_params):
+                differentiable_params = _stop_gradient_frozen(
+                    current_params,
+                    labels,
+                )
+                return self.loss_fn(differentiable_params, batch)
+
+            loss, grads = jax.value_and_grad(
+                calculate_loss,
+                allow_int=True,
+            )(params)
             updates, new_opt_state = optimizer.update(grads, opt_state, params)
-            new_params = jax.tree_util.tree_map(_safe_add, params, updates)
+            new_params = jax.tree.map(_apply_update, params, updates)
             return new_params, new_opt_state, loss
-            
-        if getattr(self.training_config, "jit_compile", False):
-            train_step = jax.jit(train_step)
+
+        compiled_train_step = None
 
         # 3. Training Loop
         import time
@@ -154,7 +275,30 @@ class Trainer:
                     break
                     
                 for batch in self.dataset_config.dataloader:
-                    params, opt_state, loss = train_step(params, opt_state, batch)
+                    batch = self._place_batch(batch)
+                    if (
+                        compiled_train_step is None
+                        and self.training_config.jit_compile
+                    ):
+                        compiled_train_step = jax.jit(
+                            train_step,
+                            in_shardings=(
+                                _tree_shardings(params),
+                                _tree_shardings(opt_state),
+                                _tree_shardings(batch),
+                            ),
+                            out_shardings=(
+                                _tree_shardings(params),
+                                _tree_shardings(opt_state),
+                                None,
+                            ),
+                        )
+                    step_fn = compiled_train_step or train_step
+                    params, opt_state, loss = step_fn(
+                        params,
+                        opt_state,
+                        batch,
+                    )
                     step += 1
                     
                     if step % self.training_config.log_interval == 0:

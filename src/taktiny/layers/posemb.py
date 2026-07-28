@@ -57,16 +57,30 @@ class RotaryEmbedding(nn.Module):
             is_medium_freq = ~(wavelen < high_freq_wavelen) & ~(wavelen > low_freq_wavelen)
             inv_freq = jnp.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
         
+        positions = jnp.arange(seq_len, dtype=jnp.float32)
         if position_idx is not None:
-            t = jnp.arange(seq_len, dtype=jnp.float32) + position_idx
+            position_idx = jnp.asarray(position_idx, dtype=jnp.float32)
+            if position_idx.ndim == 0:
+                positions = positions + position_idx
+            elif position_idx.ndim == 1:
+                positions = position_idx[:, None] + positions[None, :]
+            else:
+                raise ValueError(
+                    'position_idx must be a scalar or a batch vector'
+                )
+
+        if positions.ndim == 1:
+            freqs = jnp.einsum('s,d->sd', positions, inv_freq)
         else:
-            t = jnp.arange(seq_len, dtype=jnp.float32)
-            
-        freqs = jnp.outer(t, inv_freq)
+            freqs = jnp.einsum('bs,d->bsd', positions, inv_freq)
         emb = jnp.concatenate((freqs, freqs), axis=-1)
-        
-        cos = jnp.cos(emb)[None, :, None, :].astype(q.dtype)
-        sin = jnp.sin(emb)[None, :, None, :].astype(q.dtype)
+
+        if emb.ndim == 2:
+            cos = jnp.cos(emb)[None, :, None, :].astype(q.dtype)
+            sin = jnp.sin(emb)[None, :, None, :].astype(q.dtype)
+        else:
+            cos = jnp.cos(emb)[:, :, None, :].astype(q.dtype)
+            sin = jnp.sin(emb)[:, :, None, :].astype(q.dtype)
         
         q_embed = (q * cos) + (rotate_half(q) * sin)
         k_embed = (k * cos) + (rotate_half(k) * sin)

@@ -32,16 +32,68 @@ from pprint import pprint
 
 
 class Maestro:
+    """Registry-backed entry point for pretrained Taktiny models.
+
+    Maestro reads the architecture declared by a Hugging Face configuration,
+    resolves its registered Taktiny implementation, and delegates model
+    construction and checkpoint loading to that class. It also provides
+    helpers for inspecting the architecture registry and constructing abstract
+    models without allocating parameter buffers.
+
+    ``from_pretrained`` materializes checkpoint weights and accepts model
+    loading options such as ``dtype``, Qwix ``quant`` rules, device meshes, and
+    logical sharding rules. ``eval_shape`` only constructs the model through
+    ``jax.eval_shape``; it does not download or materialize checkpoint weights.
+
+    A mesh may be supplied directly as ``jax.sharding.Mesh`` or as a mapping
+    from mesh-axis names to sizes. When no sharding rules are provided, the
+    selected architecture's defaults are used.
+
+    Example:
+        >>> model = Maestro.from_pretrained(
+        ...     "Qwen/Qwen2.5-0.5B",
+        ...     dtype="bfloat16",
+        ... )
+        >>> abstract_model = Maestro.eval_shape(
+        ...     "Qwen/Qwen2.5-0.5B"
+        ... )
+    """
+
     @classmethod
     def list(cls):
+        """Return the distinct model implementation classes in the registry.
+
+        Multiple architecture names may resolve to the same implementation, so
+        each class appears only once.
+
+        Returns:
+            A set of registered Taktiny model classes.
+        """
         return repertoire.available_classes()
     
     @classmethod
     def available(cls):
+        """Return all registered Hugging Face architecture names.
+
+        The returned strings are the values expected in the ``architectures``
+        field of a Hugging Face model configuration.
+
+        Returns:
+            A list of registered architecture names.
+        """
         return repertoire.available()
     
     @classmethod
     def supported(cls, model_class: str):
+        """Check whether an architecture name is registered.
+
+        Args:
+            model_class: Hugging Face architecture name, such as
+                ``"LlamaForCausalLM"``.
+
+        Returns:
+            ``True`` when the architecture can be resolved by Maestro.
+        """
         return True if model_class in repertoire.available() else False
     
     @classmethod
@@ -51,8 +103,46 @@ class Maestro:
         mesh=None, 
         sharding_rules=None, 
         local=False,
+        dtype=None,
+        quant=None,
         **kwargs
     ):
+        """Load a registered model and materialize its checkpoint weights.
+
+        The architecture is selected from the model configuration's
+        ``architectures`` field. Checkpoint loading, dtype conversion, Qwix
+        quantization, and parameter placement are delegated to the selected
+        Taktiny model class.
+
+        Args:
+            repo_or_path: Hugging Face repository identifier or local
+                checkpoint directory.
+            mesh: Optional ``jax.sharding.Mesh`` or mapping from mesh-axis names
+                to device counts.
+            sharding_rules: Optional logical-to-mesh axis mapping rules. The
+                architecture defaults are used when omitted.
+            local: Whether ``repo_or_path`` refers to a local checkpoint.
+            dtype: Model dtype or uniform Qwix PTQ shortcut. Floating-point
+                values select the model parameter dtype; ``"fp8"``,
+                ``"int8"``, ``"int4"``, and ``"nf4"`` quantize supported
+                parameters while loading.
+            quant: Optional Qwix qtype string, quantization rule, PTQ provider,
+                or sequence of rules for selective weight quantization. When
+                combined with a quantized ``dtype``, explicit rules take
+                precedence and the dtype becomes the fallback for unmatched
+                modules.
+            **kwargs: Additional loading options forwarded to the selected
+                model, including ``subfolder`` and ``rngs``.
+
+        Returns:
+            A materialized instance of the registered Taktiny model.
+
+        Raises:
+            AssertionError: If the configuration does not declare exactly one
+                architecture.
+            NotImplementedError: If the declared architecture is not
+                registered.
+        """
         try:
             config_path = hf_hub_download(repo_or_path, 'config.json')
             with open(config_path, 'r') as config_file:
@@ -88,6 +178,8 @@ class Maestro:
             mesh=mesh, 
             sharding_rules=sharding_rules, 
             local=local,
+            dtype=dtype,
+            quant=quant,
             **kwargs
         )
 
@@ -100,6 +192,36 @@ class Maestro:
         local=False,
         **kwargs,
     ):
+        """Construct an abstract registered model without loading its weights.
+
+        This resolves the architecture in the same way as
+        ``from_pretrained`` but invokes its constructor under
+        ``jax.eval_shape``. Configuration data may be read from disk or
+        downloaded, while checkpoint tensors are neither downloaded nor
+        materialized.
+
+        Args:
+            repo_or_path: Hugging Face repository identifier or local model
+                directory containing ``config.json``.
+            mesh: Optional ``jax.sharding.Mesh`` or mapping from mesh-axis names
+                to device counts.
+            sharding_rules: Optional logical-to-mesh axis mapping rules. The
+                architecture defaults are used when omitted.
+            local: Whether ``repo_or_path`` refers to a local model directory.
+            **kwargs: Additional constructor options. ``config`` may supply an
+                existing ``ModelConfig`` and ``rngs`` may supply the abstract
+                initialization RNG.
+
+        Returns:
+            An abstract model whose array leaves are
+            ``jax.ShapeDtypeStruct`` values.
+
+        Raises:
+            ValueError: If configuration loading fails or it does not declare
+                exactly one architecture.
+            NotImplementedError: If the declared architecture is not
+                registered.
+        """
         config = kwargs.pop('config', None)
         if config is None:
             config = ModelConfig.load_config(repo_or_path, local=local)

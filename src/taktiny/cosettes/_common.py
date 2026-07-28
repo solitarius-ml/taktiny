@@ -25,6 +25,7 @@ from taktiny.layers import RotaryEmbedding, GateMLP, Attention
 from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
+import qwix
 from dataclasses import replace
 from typing import *
 from functools import partial
@@ -423,6 +424,7 @@ class TransformerModel(nn.Module):
             or getattr(config, 'dtype', None)
             or 'bfloat16'
         )
+        quant = getattr(config, 'quant', None)
         if not isinstance(num_hidden_layers, int) or num_hidden_layers < 1:
             raise ValueError('num_hidden_layers must be a positive integer')
         if not isinstance(module, type) or not issubclass(module, nn.Module):
@@ -435,6 +437,7 @@ class TransformerModel(nn.Module):
                 hidden_size,
                 rngs=rngs,
                 dtype=dtype,
+                quant=quant,
             )
         else:
             raise TypeError('embedding must be an nn.Module subclass or instance')
@@ -689,6 +692,7 @@ class TransformerCausalLM(PretrainedModel):
         x: jax.Array,
         attention_mask: jax.Array = None,
         ctx: TransformerContext = None,
+        logits_to_keep: int | jax.Array = 0,
     ):
         if ctx is not None and not isinstance(ctx, TransformerContext):
             raise TypeError('ctx must be a TransformerContext or None')
@@ -715,9 +719,39 @@ class TransformerCausalLM(PretrainedModel):
             out_sharding=self.model_out_sharding,
         )
 
+        if isinstance(logits_to_keep, int):
+            if logits_to_keep < 0:
+                raise ValueError('logits_to_keep must be non-negative')
+            if logits_to_keep:
+                x = x[:, -logits_to_keep:, :]
+        else:
+            indices = jnp.asarray(logits_to_keep, dtype=jnp.int32)
+            if indices.ndim != 1 or indices.shape[0] != x.shape[0]:
+                raise ValueError(
+                    'logits_to_keep must contain one index per batch row'
+                )
+            indices = jnp.where(indices < 0, indices + x.shape[1], indices)
+            x = jnp.take_along_axis(
+                x,
+                indices[:, None, None],
+                axis=1,
+            )
+
         if self.tied_word_embeddings:
             weight = self.model.embed_tokens.embedding.value
-            logits = jnp.einsum('...d,vd->...v', x, weight)
+            if isinstance(weight, qwix.QArray):
+                weight = weight.T
+                dimension_numbers = (
+                    (((x.ndim - 1,), (0,))),
+                    ((), ()),
+                )
+                logits = qwix.dot_general(
+                    x,
+                    weight,
+                    dimension_numbers,
+                )
+            else:
+                logits = jnp.einsum('...d,vd->...v', x, weight)
             if self.logits_out_sharding is not None:
                 logits = jax.lax.with_sharding_constraint(
                     logits,
@@ -789,11 +823,23 @@ class TransformerCausalLM(PretrainedModel):
         temperature: float, 
         top_k: int, 
         top_p: float, 
-        key: jax.Array
+        key: jax.Array,
+        seen_tokens: jax.Array = None,
+        repetition_penalty: float = 1.0,
     ) -> jax.Array:
+        if seen_tokens is not None:
+            penalized = jnp.where(
+                logits < 0,
+                logits * repetition_penalty,
+                logits / repetition_penalty,
+            )
+            logits = jnp.where(seen_tokens, penalized, logits)
+
+        greedy_tokens = jnp.argmax(logits, axis=-1)[:, None]
         logits = logits / jnp.maximum(temperature, 1e-5)
         
         if top_k > 0:
+            top_k = min(top_k, logits.shape[-1])
             top_k_logits, _ = jax.lax.top_k(logits, top_k)
             min_top_k = top_k_logits[:, -1:]
             logits = jnp.where(logits >= min_top_k, logits, -jnp.inf)
@@ -817,7 +863,8 @@ class TransformerCausalLM(PretrainedModel):
             
             logits = jnp.where(indices_to_remove, -jnp.inf, logits)
             
-        return jax.random.categorical(key, logits)[:, None]
+        sampled_tokens = jax.random.categorical(key, logits)[:, None]
+        return jnp.where(temperature <= 0, greedy_tokens, sampled_tokens)
 
     @partial(jax.jit, static_argnames=['max_seq_len', 'top_k', 'top_p'])
     def _decode_step(
@@ -825,9 +872,20 @@ class TransformerCausalLM(PretrainedModel):
         max_seq_len: int = None, 
         temperature: float = 1.0, 
         top_k: int = 50, 
-        top_p: float = 1.0
+        top_p: float = 1.0,
+        repetition_penalty: float = 1.0,
+        eos_token_ids: jax.Array = None,
+        pad_token_id: int = 0,
     ):
-        token, k_cache, v_cache, pos, rng = carry
+        (
+            token,
+            k_cache,
+            v_cache,
+            pos,
+            rng,
+            finished,
+            seen_tokens,
+        ) = carry
         
         decode_ctx = TransformerContext(
             key_cache=k_cache,
@@ -836,102 +894,399 @@ class TransformerCausalLM(PretrainedModel):
             is_causal=False
         )
         
-        # Mask to attend to all past tokens up to pos
-        mask = jnp.arange(max_seq_len) <= pos
-        mask = mask.reshape(1, 1, 1, max_seq_len)
+        mask = jnp.arange(max_seq_len)[None, :] <= pos[:, None]
+        mask = mask[:, None, None, :]
         
-        step_logits, decode_ctx = self(token, attention_mask=mask, ctx=decode_ctx)
+        step_logits, decode_ctx = self(
+            token,
+            attention_mask=mask,
+            ctx=decode_ctx,
+            logits_to_keep=1,
+        )
         
         rng, subkey = jax.random.split(rng)
-        next_t = self._sample(step_logits[:, -1, :], temperature, top_k, top_p, subkey)
+        next_t = self._sample(
+            step_logits[:, -1, :],
+            temperature,
+            top_k,
+            top_p,
+            subkey,
+            seen_tokens=seen_tokens,
+            repetition_penalty=repetition_penalty,
+        )
+        next_t = jnp.where(
+            finished[:, None],
+            jnp.asarray(pad_token_id, dtype=next_t.dtype),
+            next_t,
+        )
+
+        if eos_token_ids.shape[0]:
+            newly_finished = jnp.any(
+                next_t == eos_token_ids[None, :],
+                axis=-1,
+            )
+        else:
+            newly_finished = jnp.zeros_like(finished)
+
+        active = ~finished
+        finished = finished | newly_finished
+        batch_indices = jnp.arange(next_t.shape[0])
+        seen_tokens = seen_tokens.at[
+            batch_indices,
+            next_t[:, 0],
+        ].set(True)
         
         return (
             next_t,
             decode_ctx.key_cache,
             decode_ctx.value_cache,
-            pos + 1,
+            pos + active.astype(pos.dtype),
             rng,
+            finished,
+            seen_tokens,
         ), next_t
 
+    def _prepare_generation(
+        self,
+        input_ids,
+        max_new_tokens,
+        *,
+        attention_mask,
+        temperature,
+        top_k,
+        top_p,
+        repetition_penalty,
+        eos_token_id,
+        pad_token_id,
+        key,
+    ):
+        if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
+            raise ValueError('max_new_tokens must be a positive integer')
+        if not isinstance(top_k, int) or top_k < 0:
+            raise ValueError('top_k must be a non-negative integer')
+        if not 0 < top_p <= 1:
+            raise ValueError('top_p must be in the interval (0, 1]')
+        if repetition_penalty <= 0:
+            raise ValueError('repetition_penalty must be positive')
+
+        input_ids = jnp.asarray(input_ids)
+        if input_ids.ndim != 2:
+            raise ValueError('input_ids must have shape [batch, sequence]')
+        batch_size, seq_len = input_ids.shape
+
+        if attention_mask is None:
+            attention_mask = jnp.ones_like(input_ids, dtype=jnp.bool_)
+        else:
+            attention_mask = jnp.asarray(attention_mask, dtype=jnp.bool_)
+            if attention_mask.shape != input_ids.shape:
+                raise ValueError(
+                    'attention_mask must have the same shape as input_ids'
+                )
+
+        prompt_lengths = jnp.sum(
+            attention_mask,
+            axis=-1,
+            dtype=jnp.int32,
+        )
+        if bool(jnp.any(prompt_lengths == 0)):
+            raise ValueError('each prompt must contain at least one token')
+
+        compact_order = jnp.argsort(
+            ~attention_mask,
+            axis=-1,
+            stable=True,
+        )
+        compact_ids = jnp.take_along_axis(
+            input_ids,
+            compact_order,
+            axis=-1,
+        )
+        compact_mask = (
+            jnp.arange(seq_len)[None, :] < prompt_lengths[:, None]
+        )
+
+        eos_value = (
+            getattr(self.config, 'eos_token_id', None)
+            if eos_token_id is None
+            else eos_token_id
+        )
+        if eos_value is None:
+            eos_values = ()
+        elif isinstance(eos_value, (list, tuple)):
+            eos_values = tuple(int(token_id) for token_id in eos_value)
+        else:
+            eos_values = (int(eos_value),)
+        eos_token_ids = jnp.asarray(eos_values, dtype=input_ids.dtype)
+
+        if pad_token_id is None:
+            pad_token_id = getattr(self.config, 'pad_token_id', None)
+        if pad_token_id is None:
+            pad_token_id = eos_values[0] if eos_values else 0
+        pad_token_id = int(pad_token_id)
+
+        if key is None:
+            key = jax.random.key(42)
+
+        num_layers = getattr(self.config, 'num_hidden_layers', None)
+        num_heads = getattr(self.config, 'num_attention_heads', None)
+        num_kv_heads = getattr(self.config, 'num_key_value_heads', None)
+        hidden_size = getattr(self.config, 'hidden_size', None)
+        if num_layers is None:
+            raise ValueError('config.num_hidden_layers is required')
+        if num_heads is None:
+            raise ValueError('config.num_attention_heads is required')
+        if num_kv_heads is None:
+            raise ValueError('config.num_key_value_heads is required')
+        if hidden_size is None:
+            raise ValueError('config.hidden_size is required')
+
+        head_dim = (
+            getattr(self.config, 'head_dim', None)
+            or hidden_size // num_heads
+        )
+        max_seq_len = seq_len + max_new_tokens
+        model_dtype = jnp.dtype(self.dtype)
+        if not jnp.issubdtype(model_dtype, jnp.inexact):
+            raise TypeError(
+                'model compute dtype must be floating-point, '
+                f'got {model_dtype}'
+            )
+
+        cache_shape = (
+            num_layers,
+            batch_size,
+            max_seq_len,
+            num_kv_heads,
+            head_dim,
+        )
+        key_cache = jnp.zeros(cache_shape, dtype=model_dtype)
+        value_cache = jnp.zeros(cache_shape, dtype=model_dtype)
+        ctx = TransformerContext(
+            key_cache=key_cache,
+            value_cache=value_cache,
+            position_idx=jnp.asarray(0, dtype=jnp.int32),
+            is_causal=True,
+        )
+        prefill_mask = (
+            jnp.arange(max_seq_len)[None, :]
+            < prompt_lengths[:, None]
+        )
+        prefill_mask = prefill_mask[:, None, None, :]
+        logits, ctx = self(
+            compact_ids,
+            attention_mask=prefill_mask,
+            ctx=ctx,
+            logits_to_keep=prompt_lengths - 1,
+        )
+
+        seen_tokens = jnp.zeros(
+            (batch_size, self.vocab_size),
+            dtype=jnp.int32,
+        )
+        batch_indices = jnp.broadcast_to(
+            jnp.arange(batch_size)[:, None],
+            compact_ids.shape,
+        )
+        seen_tokens = seen_tokens.at[
+            batch_indices,
+            compact_ids,
+        ].add(compact_mask.astype(jnp.int32))
+        seen_tokens = seen_tokens > 0
+
+        key, subkey = jax.random.split(key)
+        next_token = self._sample(
+            logits[:, -1, :],
+            temperature,
+            top_k,
+            top_p,
+            subkey,
+            seen_tokens=seen_tokens,
+            repetition_penalty=repetition_penalty,
+        )
+        if eos_token_ids.shape[0]:
+            finished = jnp.any(
+                next_token == eos_token_ids[None, :],
+                axis=-1,
+            )
+        else:
+            finished = jnp.zeros((batch_size,), dtype=jnp.bool_)
+        seen_tokens = seen_tokens.at[
+            jnp.arange(batch_size),
+            next_token[:, 0],
+        ].set(True)
+
+        carry = (
+            next_token,
+            ctx.key_cache,
+            ctx.value_cache,
+            prompt_lengths,
+            key,
+            finished,
+            seen_tokens,
+        )
+        settings = (
+            max_seq_len,
+            eos_token_ids,
+            pad_token_id,
+        )
+        return input_ids, carry, settings
+
     def generate(
-        self, 
-        input_ids: jax.Array, 
+        self,
+        input_ids: jax.Array,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
-        key: jax.Array = None
+        key: jax.Array = None,
+        attention_mask: jax.Array = None,
+        repetition_penalty: float = 1.0,
+        eos_token_id: int | Sequence[int] = None,
+        pad_token_id: int = None,
+        streamer=None,
     ) -> jax.Array:
-        if key is None:
-            key = jax.random.key(42)
-            
-        batch_size, seq_len = input_ids.shape
-        max_seq_len = seq_len + max_new_tokens
+        if not isinstance(max_new_tokens, int) or max_new_tokens < 0:
+            raise ValueError('max_new_tokens must be a non-negative integer')
 
-        assert (num_layers := self.config.num_hidden_layers) is not None, \
-            'Cannot specified `num_hidden_layers` for key value cache generation.'
+        input_ids = jnp.asarray(input_ids)
+        if streamer is not None:
+            if not callable(getattr(streamer, 'put', None)):
+                raise TypeError('streamer must provide a callable put method')
+            if not callable(getattr(streamer, 'end', None)):
+                raise TypeError('streamer must provide a callable end method')
 
-        assert (num_attention_heads := self.config.num_attention_heads) is not None, \
-            'Cannot specified `num_attention_heads` for key value cache generation.'
-            
-        assert (num_kv_heads := self.config.num_key_value_heads) is not None, \
-            'Cannot specified `num_key_value_heads` for key value cache generation.'
-            
-        assert (hidden_size := self.config.hidden_size) is not None, \
-            'Cannot specified `head_dim` for key value cache generation'
-            
-        head_dim = (
-            getattr(self.config, 'head_dim', None)
-            or hidden_size // num_attention_heads
+            streamer.put(jax.device_get(input_ids))
+            generated = []
+            try:
+                for token_ids in self.stream_generate(
+                    input_ids,
+                    max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                    key=key,
+                    attention_mask=attention_mask,
+                    repetition_penalty=repetition_penalty,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                ):
+                    streamer.put(jax.device_get(token_ids))
+                    generated.append(token_ids)
+            finally:
+                streamer.end()
+
+            if generated:
+                return jnp.concatenate(
+                    [input_ids, *generated],
+                    axis=1,
+                )
+            return input_ids
+
+        if max_new_tokens == 0:
+            return input_ids
+
+        input_ids, carry, settings = self._prepare_generation(
+            input_ids,
+            max_new_tokens,
+            attention_mask=attention_mask,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            key=key,
         )
-        
-        # Initialize KV Cache with the model's actual dtype (e.g. bfloat16)
-        leaves = jax.tree_util.tree_leaves(self)
-        arrays = [leaf for leaf in leaves if getattr(leaf, 'dtype', None) is not None]
-        model_dtype = arrays[0].dtype if arrays else jnp.float32
-        
-        k_cache = jnp.zeros((num_layers, batch_size, max_seq_len, num_kv_heads, head_dim), dtype=model_dtype)
-        v_cache = jnp.zeros((num_layers, batch_size, max_seq_len, num_kv_heads, head_dim), dtype=model_dtype)
-        
-        # Prefill phase
-        position_idx = jnp.array(0, dtype=jnp.int32)
-        ctx = TransformerContext(
-            key_cache=k_cache,
-            value_cache=v_cache,
-            position_idx=position_idx,
-            is_causal=True # JAX native dot_product_attention handles causal masking if True
+        max_seq_len, eos_token_ids, pad_token_id = settings
+        batch_size = input_ids.shape[0]
+        generated = jnp.full(
+            (batch_size, max_new_tokens),
+            pad_token_id,
+            dtype=input_ids.dtype,
         )
-        
-        logits, ctx = self(input_ids, attention_mask=None, ctx=ctx)
-        next_token_logits = logits[:, -1, :]
-        
-        key, subkey = jax.random.split(key)
-        next_token = self._sample(next_token_logits, temperature, top_k, top_p, subkey)
-        
-        # 3. Decoding phase
-        def scan_decode_step(carry, _):
-            return self._decode_step(
-                carry, 
-                max_seq_len=max_seq_len, 
-                temperature=temperature, 
-                top_k=top_k, 
-                top_p=top_p
+        generated = generated.at[:, 0].set(carry[0][:, 0])
+
+        def cond_fn(loop_state):
+            step, decode_carry, _ = loop_state
+            return (step < max_new_tokens) & ~jnp.all(decode_carry[5])
+
+        def body_fn(loop_state):
+            step, decode_carry, tokens = loop_state
+            decode_carry, next_token = self._decode_step(
+                decode_carry,
+                max_seq_len=max_seq_len,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                eos_token_ids=eos_token_ids,
+                pad_token_id=pad_token_id,
             )
-            
-        initial_pos = jnp.array(seq_len, dtype=jnp.int32)
-        initial_carry = (
-            next_token,
-            ctx.key_cache,
-            ctx.value_cache,
-            initial_pos,
-            key,
+            tokens = tokens.at[:, step].set(next_token[:, 0])
+            return step + 1, decode_carry, tokens
+
+        generated_count, _, generated = jax.lax.while_loop(
+            cond_fn,
+            body_fn,
+            (jnp.asarray(1, dtype=jnp.int32), carry, generated),
         )
-        _, new_tokens = jax.lax.scan(scan_decode_step, initial_carry, None, length=max_new_tokens - 1)
-        
-        # new_tokens is shape [max_new_tokens - 1, batch_size, 1] -> swap to [batch_size, max_new_tokens - 1]
-        new_tokens = new_tokens.swapaxes(0, 1).reshape(batch_size, -1)
-        
-        return jnp.concatenate([input_ids, next_token, new_tokens], axis=1)
+        generated_count = int(jax.device_get(generated_count))
+        return jnp.concatenate(
+            [input_ids, generated[:, :generated_count]],
+            axis=1,
+        )
+
+    def stream_generate(
+        self,
+        input_ids: jax.Array,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        key: jax.Array = None,
+        attention_mask: jax.Array = None,
+        repetition_penalty: float = 1.0,
+        eos_token_id: int | Sequence[int] = None,
+        pad_token_id: int = None,
+    ):
+        """Yield one generated token per batch row at each decode step."""
+        if max_new_tokens == 0:
+            return
+
+        _, carry, settings = self._prepare_generation(
+            input_ids,
+            max_new_tokens,
+            attention_mask=attention_mask,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            key=key,
+        )
+        max_seq_len, eos_token_ids, pad_token_id = settings
+        yield carry[0]
+
+        for _ in range(max_new_tokens - 1):
+            if bool(jax.device_get(jnp.all(carry[5]))):
+                break
+            carry, next_token = self._decode_step(
+                carry,
+                max_seq_len=max_seq_len,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                eos_token_ids=eos_token_ids,
+                pad_token_id=pad_token_id,
+            )
+            yield next_token
+
+
+class TransformerConditionalGeneration(PretrainedModel):
+    def __init__(self):
+        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
 class TransformerMM(PretrainedModel):
@@ -957,6 +1312,7 @@ __all__ = [
     'TransformerDecoderLayer',
     'TransformerModel',
     'TransformerCausalLM',
+    'TransformerConditionalGeneration',
     'TransformerMM',
     'DiffusionLM',
     'DiffusionIM',

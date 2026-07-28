@@ -33,11 +33,12 @@ class TrainingConfig:
 @dataclass(frozen=True)
 class DatasetConfig:
     # A generic iterable that yields batches (e.g. tf.data, PyTorch DataLoader, or custom generator)
-    dataloader: Iterable[Any]   
+    dataloader: Iterable[Any]
     validation_dataloader: Optional[Iterable[Any]] = None
     repo_id: Optional[str] = None
     process_fn: Optional[Callable] = None        # process dataset downloaded from given `repo_id`; return Tuple[train, validation] otherwise train
     loader_type: Optional[str | Callable] = None # apply loader after `process_fn` e.g. 'grain', or Callable return custom loader 
+    batch_sharding: Any = None   # Sharding applied to every batch leaf, or a matching sharding PyTree
     shuffle: bool = True
     seed: int = 42              # shuffle seed if `shuffle == True`
 

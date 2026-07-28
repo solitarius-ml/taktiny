@@ -22,10 +22,20 @@ __description__ = (
 
 from taktiny.maestro._prelude import Maestro
 from taktiny.maestro._config import ModelConfig
+from taktiny.takt import LoraConfig, PeftConfig, Takt
 from taktiny.trainer.trainer import Trainer
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
 from taktiny import nn
 
 from taktiny.maestro.opus import *
 
-__all__ = ['Maestro', 'ModelConfig', 'Trainer', 'TrainingConfig', 'DatasetConfig']
+__all__ = [
+    'Maestro',
+    'Takt',
+    'PeftConfig',
+    'LoraConfig',
+    'ModelConfig',
+    'Trainer',
+    'TrainingConfig',
+    'DatasetConfig',
+]

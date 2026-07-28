@@ -2,8 +2,8 @@
 
 Taktiny is an experimental neural-network library built directly on JAX. It
 provides object-oriented modules that remain valid JAX PyTrees, a small set of
-transformer building blocks, and `Maestro` for loading compatible Hugging Face
-checkpoints into native Taktiny models.
+transformer building blocks, `Maestro` for loading compatible Hugging Face
+checkpoints, and `Takt` for transforming existing model instances.
 
 The project is under active development. APIs, checkpoint mappings, and model
 coverage may change between revisions.
@@ -17,12 +17,27 @@ coverage may change between revisions.
 - Reusable transformer decoder, model, and causal-LM components
 - KV-cached autoregressive generation
 - Logical parameter axes and optional JAX mesh sharding
-- Experimental quantized linear layers and LoRA utilities
+- Qwix weight-only PTQ and registry-backed PEFT transformations
 
 ## Requirements
 
 - Python 3.11 or newer
 - JAX 0.10.2 or newer
+
+## Testing
+
+The offline test suite uses tiny deterministic checkpoints and does not
+download pretrained weights:
+
+```bash
+uv run pytest
+```
+
+It checks Hugging Face logit parity for Llama, Qwen2, Gemma, Gemma2, and
+Gemma3, together with full-versus-cached decoding, checkpoint-key coverage,
+sliding-window boundaries, BF16 loading, and Qwix INT8/INT4 loading. Original Qwen
+uses legacy Hugging Face remote code that is incompatible with Transformers
+5.13; its offline tests cover checkpoint mapping and cached decoding instead.
 
 
 ## Quick Start
@@ -56,13 +71,61 @@ print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
 Model loading and generation materialize checkpoint parameters and KV caches.
 Choose a checkpoint and dtype that fit the available device and host memory.
 
+## Quantized Loading
+
+Checkpoint weights can be quantized as they are loaded. Taktiny stores matching
+linear weights and embedding tables as Qwix `QArray` values:
+
+```python
+import qwix
+
+from taktiny import Maestro
+
+rules = [
+    qwix.QuantizationRule(
+        module_path=r".*(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)",
+        weight_qtype="int8",
+    ),
+]
+
+model = Maestro.from_pretrained(
+    "Qwen/Qwen2.5-0.5B",
+    dtype="bfloat16",
+    quant=rules,
+)
+```
+
+For a uniform weight-only format, `dtype="int8"` and `dtype="int4"` remain
+shortcuts. The quantized dtype describes linear-weight and embedding-table
+storage. Activations, quantization scales, and operation outputs remain BF16
+by default, while Qwix selects the available dot implementation for the
+quantized operands.
+
+The shortcut can be combined with explicit rules. Explicit rules are checked
+first, and the dtype is used as the fallback for unmatched modules:
+
+```python
+model = Maestro.from_pretrained(
+    "Qwen/Qwen2.5-0.5B",
+    dtype="int4",
+    quant=[
+        qwix.QuantizationRule(
+            module_path=r".*self_attn\.q_proj",
+            weight_qtype="int8",
+        ),
+    ],
+)
+```
+
 ## Implemented Architectures
 
 | Hugging Face architecture | Taktiny class | Status |
 | --- | --- | --- |
 | `LlamaForCausalLM` | `Llama` | Implemented |
+| `QWenLMHeadModel` | `Qwen` | Implemented |
 | `Qwen2ForCausalLM` | `Qwen2` | Implemented |
 | `GemmaForCausalLM` | `Gemma` | Implemented |
+| `Gemma3ForCausalLM` | `Gemma3` | Implemented |
 
 Other architecture names may appear in the internal repertoire as development
 placeholders. Registration alone does not mean that checkpoint loading or
@@ -92,6 +155,29 @@ print(abstract_model)
 This is useful for inspecting parameter counts, shapes, and dtypes before
 loading a checkpoint. It does not estimate temporary compilation memory or KV
 cache usage.
+
+## Applying PEFT
+
+`Takt` applies registered transformations to an existing model. PEFT methods
+are selected by configuration type, allowing additional adapter families to
+share one public entry point:
+
+```python
+from taktiny import LoraConfig, Takt
+
+model = Takt.apply_peft(
+    model,
+    LoraConfig(
+        target_modules=["q_proj", "v_proj"],
+        rank=16,
+        alpha=32,
+    ),
+)
+```
+
+PEFT transformations currently mutate the supplied model and return the same
+instance. LoRA is implemented; additional configuration types can register
+their own implementations with `Takt.register_peft`.
 
 ## Building Modules
 
@@ -238,6 +324,7 @@ src/taktiny/
 ├── layers/             Attention, feed-forward, positional, and vision layers
 ├── cosettes/           Reusable model implementations
 ├── maestro/            Architecture registry and checkpoint orchestration
+├── takt/               Existing-model transformations and PEFT methods
 ├── trainer/            Experimental training utilities
 └── utils/              Sharding, quantization, typing, and weight mapping
 ```

@@ -105,6 +105,13 @@ class Attention(nn.Module):
             
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_k_norm', False):
             self.k_norm = nn.RMSNorm(self.head_dim, dtype=dtype, shard_mode=shard_mode)
+
+    def _scale_query(
+        self,
+        query: jax.Array,
+        position_idx: jax.Array = None,
+    ) -> jax.Array:
+        return query
         
     def __call__(
         self, 
@@ -132,12 +139,45 @@ class Attention(nn.Module):
         # Apply Positional Embeddings (if provided)
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, position_idx)
+
+        q = self._scale_query(q, position_idx)
         
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
-            # Update cache at position_idx using dynamic_update_slice
-            k_cache = jax.lax.dynamic_update_slice(k_cache, k, (0, position_idx, 0, 0))
-            v_cache = jax.lax.dynamic_update_slice(v_cache, v, (0, position_idx, 0, 0))
+            cache_position = jnp.asarray(position_idx, dtype=jnp.int32)
+            if cache_position.ndim == 0:
+                k_cache = jax.lax.dynamic_update_slice(
+                    k_cache,
+                    k,
+                    (0, cache_position, 0, 0),
+                )
+                v_cache = jax.lax.dynamic_update_slice(
+                    v_cache,
+                    v,
+                    (0, cache_position, 0, 0),
+                )
+            elif cache_position.ndim == 1:
+                def update_cache(cache_row, value_row, row_position):
+                    return jax.lax.dynamic_update_slice(
+                        cache_row,
+                        value_row,
+                        (row_position, 0, 0),
+                    )
+
+                k_cache = jax.vmap(update_cache)(
+                    k_cache,
+                    k,
+                    cache_position,
+                )
+                v_cache = jax.vmap(update_cache)(
+                    v_cache,
+                    v,
+                    cache_position,
+                )
+            else:
+                raise ValueError(
+                    'position_idx must be a scalar or a batch vector'
+                )
             
             # Use the full cache for attention
             k = k_cache
@@ -154,9 +194,17 @@ class Attention(nn.Module):
                     if position_idx is None
                     else jnp.asarray(position_idx, dtype=jnp.int32)
                 )
-                query_positions = (
-                    query_start + jnp.arange(q_len, dtype=jnp.int32)
-                )
+                query_offsets = jnp.arange(q_len, dtype=jnp.int32)
+                if query_start.ndim == 0:
+                    query_positions = query_start + query_offsets
+                elif query_start.ndim == 1:
+                    query_positions = (
+                        query_start[:, None] + query_offsets[None, :]
+                    )
+                else:
+                    raise ValueError(
+                        'position_idx must be a scalar or a batch vector'
+                    )
 
                 # Cached keys use absolute positions from the start of the
                 # sequence. Uncached keys belong to the same local chunk as Q.
@@ -169,12 +217,26 @@ class Attention(nn.Module):
                     k_len, dtype=jnp.int32
                 )
 
-                causal_mask = (
-                    key_positions[None, :] <= query_positions[:, None]
-                )
-                window_mask = key_positions[None, :] >= (
-                    query_positions[:, None] - self.window_size + 1
-                )
+                if query_positions.ndim == 1:
+                    causal_mask = (
+                        key_positions[None, :]
+                        <= query_positions[:, None]
+                    )
+                    window_mask = key_positions[None, :] >= (
+                        query_positions[:, None] - self.window_size + 1
+                    )
+                else:
+                    causal_mask = (
+                        key_positions[None, None, :]
+                        <= query_positions[:, :, None]
+                    )
+                    window_mask = key_positions[None, None, :] >= (
+                        query_positions[:, :, None]
+                        - self.window_size
+                        + 1
+                    )
+                    causal_mask = causal_mask[:, None, :, :]
+                    window_mask = window_mask[:, None, :, :]
                 sliding_mask = causal_mask & window_mask
 
                 if attention_mask is not None:

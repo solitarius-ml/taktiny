@@ -54,6 +54,8 @@ class SequentialStack(Module):
         for child in self.stacked.flat_parameter_dict().values():
             if hasattr(child, 'axis_names') and child.axis_names is not None:
                 child.axis_names = (None,) + tuple(child.axis_names)
+            if hasattr(child, 'quantization_batch_axis_count'):
+                child.quantization_batch_axis_count += 1
         
         self.num_stack = num_stack
 
