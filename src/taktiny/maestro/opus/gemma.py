@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes._common import (
     TransformerCausalLM,
+    TransformerConditionalGeneration,
     DiffusionLM,
     TransformerMM,
 )
@@ -28,6 +29,9 @@ from taktiny.cosettes.transformers.gemma import (
     GemmaRMSNorm,
     GemmaDecoderLayer,
     Gemma2DecoderLayer,
+    Gemma3TextScaledWordEmbedding,
+    Gemma3RMSNorm,
+    Gemma3DecoderLayer,
 )
 from taktiny import nn
 
@@ -109,11 +113,18 @@ class Gemma2(TransformerCausalLM):
             None,
         )
 
-    def __call__(self, x, attention_mask=None, ctx=None):
+    def __call__(
+        self,
+        x,
+        attention_mask=None,
+        ctx=None,
+        logits_to_keep=0,
+    ):
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
             ctx=ctx,
+            logits_to_keep=logits_to_keep,
         )
         if self.final_logit_softcapping is not None:
             cap = self.final_logit_softcapping
@@ -121,9 +132,130 @@ class Gemma2(TransformerCausalLM):
         return logits, ctx
 
 
-class Gemma3(TransformerMM):
+class Gemma3(TransformerCausalLM):
+    def __init__(
+        self,
+        config,
+        rngs: nn.Rngs = None,
+        mesh=None,
+        sharding_rules=None,
+    ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
+        if bool(getattr(config, 'use_bidirectional_attention', False)):
+            raise NotImplementedError(
+                'Gemma3 bidirectional attention is not supported'
+            )
+
+        config.tie_word_embeddings = True
+        config.head_dim = (
+            getattr(config, 'head_dim', None)
+            or config.hidden_size // config.num_attention_heads
+        )
+        config.num_key_value_heads = (
+            getattr(config, 'num_key_value_heads', None)
+            or config.num_attention_heads
+        )
+        config.rope_theta = (
+            getattr(config, 'rope_theta', None)
+            or 1_000_000.0
+        )
+        config.rope_local_base_freq = (
+            getattr(config, 'rope_local_base_freq', None)
+            or 10_000.0
+        )
+        config.query_pre_attn_scalar = (
+            getattr(config, 'query_pre_attn_scalar', None)
+            or 256
+        )
+        config.attention_bias = bool(
+            getattr(config, 'attention_bias', False)
+        )
+        config.rms_norm_eps = (
+            getattr(config, 'rms_norm_eps', None)
+            or 1e-6
+        )
+
+        if getattr(config, 'layer_types', None) is None:
+            pattern = (
+                getattr(config, 'sliding_window_pattern', None)
+                or 6
+            )
+            config.layer_types = [
+                (
+                    'sliding_attention'
+                    if (layer_idx + 1) % pattern
+                    else 'full_attention'
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+
+        super().__init__(
+            config,
+            rngs=rngs,
+            embedding=Gemma3TextScaledWordEmbedding,
+            decoder=Gemma3DecoderLayer,
+            norm=Gemma3RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+        )
+        self.final_logit_softcapping = getattr(
+            config,
+            'final_logit_softcapping',
+            None,
+        )
+
+    def __call__(
+        self,
+        x,
+        attention_mask=None,
+        ctx=None,
+        logits_to_keep=0,
+    ):
+        logits, ctx = super().__call__(
+            x,
+            attention_mask=attention_mask,
+            ctx=ctx,
+            logits_to_keep=logits_to_keep,
+        )
+        if self.final_logit_softcapping is not None:
+            cap = self.final_logit_softcapping
+            logits = cap * jnp.tanh(logits / cap)
+        return logits, ctx
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo,
+        mesh=None,
+        sharding_rules=None,
+        local=False,
+        **kwargs,
+    ):
+        from taktiny.maestro._config import ModelConfig
+
+        if 'config' in kwargs:
+            config = kwargs.pop('config')
+        else:
+            config = ModelConfig.load_config(path_or_repo, local=local)
+        config.tie_word_embeddings = True
+
+        return super().from_pretrained(
+            path_or_repo,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            local=local,
+            config=config,
+            **kwargs,
+        )
+
+
+class Gemma3ConditionalGeneration(TransformerConditionalGeneration):
     def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+        raise NotImplementedError(
+            'Gemma3 multimodal conditional generation is not implemented'
+        )
 
 
 class Gemma4(TransformerMM):
@@ -144,7 +276,10 @@ class DiffusionGemma(DiffusionLM):
 repertoire.register('GemmaForCausalLM', Gemma)
 repertoire.register('Gemma2ForCausalLM', Gemma2)
 repertoire.register('Gemma3ForCausalLM', Gemma3)
-repertoire.register('Gemma3ForConditionalGeneration', Gemma3)
+repertoire.register(
+    'Gemma3ForConditionalGeneration',
+    Gemma3ConditionalGeneration,
+)
 repertoire.register('Gemma4ForConditionalGeneration', Gemma4)
 repertoire.register('Gemma4UnifiedForConditionalGeneration', Gemma4Unified)
 repertoire.register('DiffusionGemmaForBlockDiffusion', DiffusionGemma)
@@ -153,6 +288,7 @@ __all__ = [
     'Gemma', 
     'Gemma2', 
     'Gemma3', 
+    'Gemma3ConditionalGeneration',
     'Gemma4', 
     'Gemma4Unified', 
     'DiffusionGemma'

@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import json
 import jax
-import jax.numpy as jnp
 from pathlib import Path
 from huggingface_hub import hf_hub_download
 from safetensors.flax import save_file
@@ -67,6 +66,7 @@ class PretrainedModel(Module):
         module_map=None, 
         local=False, 
         dtype=None, 
+        quant=None,
         subfolder=None, 
         mesh=None, 
         sharding_rules=None, 
@@ -76,9 +76,42 @@ class PretrainedModel(Module):
         Loads safetensors weights into a newly instantiated model.
         Supports both single-file (model.safetensors) and sharded models.
         """
+        uniform_quant = None
         if dtype is not None:
-            setattr(config, 'dtype', dtype)
-            setattr(config, 'torch_dtype', dtype)
+            dtype_name = dtype.lower() if isinstance(dtype, str) else None
+            quantized_dtypes = {'fp8', 'int8', 'int4', 'nf4'}
+            if dtype_name in quantized_dtypes:
+                compute_dtype = (
+                    getattr(config, 'torch_dtype', None)
+                    or getattr(config, 'dtype', None)
+                )
+                if (
+                    compute_dtype is None
+                    or (
+                        isinstance(compute_dtype, str)
+                        and compute_dtype.lower() in quantized_dtypes
+                    )
+                ):
+                    compute_dtype = 'bfloat16'
+
+                uniform_quant = dtype_name
+                setattr(config, 'dtype', compute_dtype)
+                setattr(config, 'torch_dtype', compute_dtype)
+            else:
+                setattr(config, 'dtype', dtype)
+                setattr(config, 'torch_dtype', dtype)
+        if quant is not None and uniform_quant is not None:
+            from ..utils.quantization import merge_quantization
+
+            setattr(
+                config,
+                'quant',
+                merge_quantization(quant, uniform_quant),
+            )
+        elif quant is not None:
+            setattr(config, 'quant', quant)
+        elif uniform_quant is not None:
+            setattr(config, 'quant', uniform_quant)
 
         path_or_repo_str = str(path_or_repo)
         module_map = module_map or []
@@ -134,8 +167,16 @@ class PretrainedModel(Module):
                 )
 
         # 4. Instantiate model skeleton using eval_shape (no memory allocation)
-        rngs = kwargs.get('rngs', Rngs(0))
-        state = jax.eval_shape(lambda: cls(config, rngs=rngs, mesh=mesh, sharding_rules=sharding_rules))
+        rngs = kwargs.pop('rngs', Rngs(0))
+        state = jax.eval_shape(
+            lambda: cls(
+                config,
+                rngs=rngs,
+                mesh=mesh,
+                sharding_rules=sharding_rules,
+                **kwargs,
+            )
+        )
         current_state_dict = state.flat_parameter_dict()
         new_state = {}
         not_found_some = False
@@ -144,7 +185,124 @@ class PretrainedModel(Module):
         import re
         import numpy as np
         from safetensors import safe_open
+        from ..utils.quantization import (
+            quantize_embedding_weight,
+            quantize_linear_weight,
+            resolve_quantization_rule,
+        )
         from ..utils.weights import map_state_dict
+
+        cpu_device = jax.devices('cpu')[0]
+
+        def parameter_sharding(
+            parameter,
+            axis_names=None,
+            *,
+            use_explicit=True,
+        ):
+            sharding = (
+                getattr(parameter, 'sharding', None)
+                if use_explicit
+                else None
+            )
+            if (
+                sharding is None
+                and axis_names is not None
+                and mesh is not None
+            ):
+                from ..utils.sharding import create_sharding
+
+                sharding = create_sharding(
+                    mesh,
+                    axis_names,
+                    rules=sharding_rules,
+                )
+            return sharding
+
+        def place_qarray(value, parameter):
+            axis_names = getattr(parameter, 'axis_names', None)
+            qvalue_sharding = parameter_sharding(parameter, axis_names)
+
+            scale_axis_names = None
+            if axis_names is not None:
+                scale_axis_names = tuple(
+                    axis_name if size != 1 else None
+                    for axis_name, size in zip(
+                        axis_names,
+                        value.scale.shape,
+                    )
+                )
+            scale_sharding = parameter_sharding(
+                parameter,
+                scale_axis_names,
+                use_explicit=False,
+            )
+
+            zero_point = value.zero_point
+            if zero_point is not None:
+                zero_axis_names = None
+                if axis_names is not None:
+                    zero_axis_names = tuple(
+                        axis_name if size != 1 else None
+                        for axis_name, size in zip(
+                            axis_names,
+                            zero_point.shape,
+                        )
+                    )
+                zero_point = jax.device_put(
+                    zero_point,
+                    parameter_sharding(
+                        parameter,
+                        zero_axis_names,
+                        use_explicit=False,
+                    ),
+                )
+
+            return value.replace(
+                qvalue=jax.device_put(value.qvalue, qvalue_sharding),
+                scale=jax.device_put(value.scale, scale_sharding),
+                zero_point=zero_point,
+            )
+
+        def materialize_parameter(key, value, parameter):
+            quantization = getattr(parameter, 'quantization', None)
+            quantization_kind = getattr(
+                parameter,
+                'quantization_kind',
+                'linear',
+            )
+            rule = resolve_quantization_rule(
+                quantization,
+                key.rsplit('.', 1)[0],
+                op_name=quantization_kind,
+            )
+            if rule is not None:
+                parameter.trainable = False
+                with jax.default_device(cpu_device):
+                    if quantization_kind == 'embedding':
+                        quantized = quantize_embedding_weight(
+                            value,
+                            parameter,
+                            rule,
+                        )
+                    else:
+                        quantized = quantize_linear_weight(
+                            value,
+                            parameter,
+                            rule,
+                        )
+                return place_qarray(quantized, parameter)
+
+            target_dtype = np.dtype(parameter.dtype)
+            if value.dtype != target_dtype:
+                value = value.astype(target_dtype, copy=False)
+            return jax.device_put(
+                value,
+                parameter_sharding(
+                    parameter,
+                    getattr(parameter, 'axis_names', None),
+                ),
+            )
 
         stacked_states = {}
         grouped_mapping = any(
@@ -177,97 +335,29 @@ class PretrainedModel(Module):
                         target_var = current_state_dict[k_mapped]
                         
                         if value.ndim == 2:
-                            if k_mapped.endswith(".weight") or k_mapped.endswith(".weights_q") or ".lora_" in k_mapped:
+                            if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                 value = value.T
                         if value.shape != target_var.shape:
                             value = value.reshape(target_var.shape)
-
-                        target_dtype = np.dtype(target_var.dtype)
-                        if value.dtype != target_dtype:
-                            value = value.astype(target_dtype, copy=False)
-                            
-                        sharding = getattr(target_var, "sharding", None)
-                        if sharding is None and getattr(target_var, "axis_names", None) is not None and mesh is not None:
-                            from ..utils.sharding import create_sharding
-                            sharding = create_sharding(mesh, target_var.axis_names, rules=sharding_rules)
-                        value = jax.device_put(value, sharding)
-                            
-                        new_state[k_mapped] = value
-                    elif k_mapped.replace('.weight', '.weights_q') in current_state_dict:
-                        # Dynamic Quantization Interceptor for non-stacked modules
-                        k_weights_q = k_mapped.replace('.weight', '.weights_q')
-                        k_scales_q = k_mapped.replace('.weight', '.scales_q')
-                        k_scale_of_scales = k_mapped.replace('.weight', '.scale_of_scales')
-                        
-                        target_var = current_state_dict[k_weights_q]
-                        
-                        # Handle transpose for Linear
-                        # For unquantized, it was [in, out]. Check target_var shape.
-                        # Target shape for weights_q could be packed (e.g. out_features // 2). 
-                        # We always transpose if value.shape[0] == out_features of original layer.
-                        # Original layer out_features = value.shape[0] if it was (out, in).
-                        if value.ndim == 2:
-                            if k_mapped.endswith(".weight") or k_mapped.endswith(".weights_q") or ".lora_" in k_mapped:
-                                value = value.T
-                            
-                        from ..utils.quantization import (
-                            quantize_to_fp8_double, quantize_to_int8_double, 
-                            quantize_to_int4_double, quantize_to_fp4_double
+                        new_state[k_mapped] = materialize_parameter(
+                            k_mapped,
+                            value,
+                            target_var,
                         )
-                        
-                        # Infer block size from target_var and value
-                        if target_var.dtype == jnp.uint8:
-                            # INT4 / FP4 packed
-                            # target_var is [in_features, out_features // 2]
-                            pass # block_size is fixed to 128 for now
-                        
-                        if dtype == "fp8":
-                            w_q, s_q, sos = quantize_to_fp8_double(value, block_size=128)
-                        elif dtype == "int8":
-                            w_q, s_q, sos = quantize_to_int8_double(value, block_size=128)
-                        elif dtype == "int4":
-                            block_size = 128
-                            if value.shape[0] % 128 != 0:
-                                block_size = 64
-                            w_q, s_q, sos = quantize_to_int4_double(value, block_size=block_size)
-                        elif dtype == "fp4":
-                            w_q, s_q, sos = quantize_to_fp4_double(value, block_size=128)
-                            
-                        sharding = getattr(target_var, "sharding", None)
-                        if sharding is None and getattr(target_var, "axis_names", None) is not None and mesh is not None:
-                            from ..utils.sharding import create_sharding
-                            sharding = create_sharding(mesh, target_var.axis_names, rules=sharding_rules)
-                        
-                        w_q = jax.device_put(w_q, sharding)
-                        s_q = jax.device_put(s_q, sharding)
-                        sos = jax.device_put(sos, sharding)
-                        
-                        # Cast to correct JAX types
-                        if dtype == "fp8":
-                            w_q = w_q.astype(jnp.float8_e4m3fn)
-                            s_q = s_q.astype(jnp.float8_e4m3fn)
-                        elif dtype == "int8":
-                            w_q = w_q.astype(jnp.int8)
-                            s_q = s_q.astype(jnp.int8)
-                        
-                        new_state[k_weights_q] = w_q
-                        new_state[k_scales_q] = s_q
-                        new_state[k_scale_of_scales] = sos
 
                     else:
-                        # Check if it belongs to a SequentialStack
+                        # Check if it belongs to a SeqStack
                         match = re.search(r'\.(\d+)\.', k_mapped)
                         if match:
                             idx = int(match.group(1))
                             k_stacked = k_mapped[:match.start()] + '.stacked.' + k_mapped[match.end():]
-                            k_stacked_q = k_stacked.replace('.weight', '.weights_q')
                             
                             if k_stacked in current_state_dict:
                                 target_var = current_state_dict[k_stacked]
                                 
                                 layer_shape = target_var.shape[1:]
                                 if value.ndim == 2:
-                                    if k_mapped.endswith(".weight") or k_mapped.endswith(".weights_q") or ".lora_" in k_mapped:
+                                    if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                         value = value.T
                                 if value.shape != layer_shape:
                                     value = value.reshape(layer_shape)
@@ -277,64 +367,17 @@ class PretrainedModel(Module):
                                 stacked_states[k_stacked][idx] = value
                                 continue
                                 
-                            elif k_stacked_q in current_state_dict:
-                                target_var = current_state_dict[k_stacked_q]
-                                
-                                if value.ndim == 2:
-                                    if k_mapped.endswith(".weight") or k_mapped.endswith(".weights_q") or ".lora_" in k_mapped:
-                                        value = value.T
-                                    
-                                from ..utils.quantization import (
-                                    quantize_to_fp8_double, quantize_to_int8_double, 
-                                    quantize_to_int4_double, quantize_to_fp4_double
-                                )
-                                
-                                if dtype == "fp8":
-                                    w_q, s_q, sos = quantize_to_fp8_double(value, block_size=128)
-                                elif dtype == "int8":
-                                    w_q, s_q, sos = quantize_to_int8_double(value, block_size=128)
-                                elif dtype == "int4":
-                                    block_size = 128
-                                    if value.shape[0] % 128 != 0:
-                                        block_size = 64
-                                    w_q, s_q, sos = quantize_to_int4_double(value, block_size=block_size)
-                                elif dtype == "fp4":
-                                    w_q, s_q, sos = quantize_to_fp4_double(value, block_size=128)
-                                    
-                                k_scales_q = k_stacked.replace('.weight', '.scales_q')
-                                k_scale_of_scales = k_stacked.replace('.weight', '.scale_of_scales')
-                                
-                                if k_stacked_q not in stacked_states:
-                                    stacked_states[k_stacked_q] = np.zeros(target_var.shape, dtype=w_q.dtype)
-                                    stacked_states[k_scales_q] = np.zeros(current_state_dict[k_scales_q].shape, dtype=s_q.dtype)
-                                    stacked_states[k_scale_of_scales] = np.zeros(current_state_dict[k_scale_of_scales].shape, dtype=sos.dtype)
-                                    
-                                stacked_states[k_stacked_q][idx] = w_q
-                                stacked_states[k_scales_q][idx] = s_q
-                                stacked_states[k_scale_of_scales][idx] = sos
-                                continue
-                                
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
-        # Move accumulated SequentialStack weights to JAX
+        # Move accumulated SeqStack weights to JAX
         for k_stacked, stacked_array in stacked_states.items():
             target_var = current_state_dict[k_stacked]
-            sharding = getattr(target_var, "sharding", None)
-            if sharding is None and getattr(target_var, "axis_names", None) is not None and mesh is not None:
-                from ..utils.sharding import create_sharding
-                sharding = create_sharding(mesh, target_var.axis_names, rules=sharding_rules)
-            
-            stacked_array = jax.device_put(stacked_array, sharding)
-            
-            # If it's an FP8 or INT8 quantized parameter, we must explicitly cast it inside JAX
-            # because NumPy arrays cannot natively represent FP8 E4M3, and we store them as uint8 temporarily.
-            if target_var.dtype == jnp.float8_e4m3fn:
-                stacked_array = stacked_array.astype(jnp.float8_e4m3fn)
-            elif target_var.dtype == jnp.int8:
-                stacked_array = stacked_array.astype(jnp.int8)
-                
-            new_state[k_stacked] = stacked_array
+            new_state[k_stacked] = materialize_parameter(
+                k_stacked,
+                stacked_array,
+                target_var,
+            )
 
         if not_found_some:
             print("\nSome modules from the checkpoint were not found in this model.")

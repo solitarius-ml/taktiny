@@ -15,6 +15,7 @@
 
 import jax
 import operator
+import qwix
 from jax.tree_util import register_pytree_node_class
 
 def _format_scaled(value, scale, suffix):
@@ -72,15 +73,17 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
     child_prefix = "" if is_root else prefix + ("    " if is_last else "│   ")
     
     if isinstance(obj, Parameter):
-        p = obj.value.size
-        b = 0.0
-        itemsize = getattr(obj.value, 'itemsize', None)
-        if itemsize is None:
-            itemsize = getattr(obj.value.dtype, 'itemsize', None)
-        if itemsize is not None:
-            b = obj.value.size * itemsize
-
-        dt = format_dtype(obj.value.dtype)
+        if isinstance(obj.value, qwix.QArray):
+            p = obj.value.qvalue.size
+            b = sum(
+                getattr(leaf, 'nbytes', 0)
+                for leaf in jax.tree_util.tree_leaves(obj.value)
+            )
+            dt = f'qwix[{obj.value.qtype}]'
+        else:
+            p = obj.value.size
+            b = getattr(obj.value, 'nbytes', 0)
+            dt = format_dtype(obj.value.dtype)
         sh = ", ".join(map(str, obj.value.shape))
         lines.append(f"{current_prefix}{name}: {dt}[{sh}]")
         return lines, p, b
@@ -206,13 +209,22 @@ class Module:
                     child.load_state_dict(state[name])
 
 class Parameter(Module):
-    def __init__(self, array: jax.Array):
+    def __init__(self, array: jax.Array, *, trainable: bool = True):
         self.value = array
+        self.trainable = trainable
 
     def __repr__(self):
-        return f"Parameter(shape={getattr(self.value, 'shape', 'None')}, dtype={getattr(self.value, 'dtype', 'None')})"
+        return (
+            "Parameter("
+            f"shape={getattr(self.value, 'shape', 'None')}, "
+            f"dtype={getattr(self.value, 'dtype', 'None')}, "
+            f"trainable={self.trainable}"
+            ")"
+        )
 
     def __jax_array__(self):
+        if isinstance(self.value, qwix.QArray):
+            return qwix.dequantize(self.value)
         return self.value
 
     def __getattr__(self, name):

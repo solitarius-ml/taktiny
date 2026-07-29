@@ -16,6 +16,7 @@
 import jax
 import math
 import jax.numpy as jnp
+import qwix
 from jax.nn.initializers import normal
 
 from taktiny.nn.module import Module, Parameter
@@ -29,7 +30,8 @@ class Embedding(Module):
         rngs: Rngs = None, 
         seed: Rngs = None, 
         dtype: DType | str = jnp.float32,
-        initializer = normal(0.02)
+        initializer = normal(0.02),
+        quant=None,
     ):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
@@ -46,9 +48,14 @@ class Embedding(Module):
         self.embedding = Parameter(
             initializer(key, (num_embeddings, embedding_dim), dtype)
         )
+        self.embedding.quantization = quant
+        self.embedding.quantization_kind = 'embedding'
         
     def __call__(self, indices: jax.Array) -> jax.Array:
-        return self.embedding[indices]
+        table = self.embedding.value
+        if isinstance(table, qwix.QArray):
+            return qwix.dequantize(table[indices])
+        return table[indices]
 
     def extra_repr(self):
         return f"{self.num_embeddings} → {self.embedding_dim}"

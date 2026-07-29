@@ -205,11 +205,13 @@ class Flux2Transformer2DModel(nn.Module):
         self.single_stream_modulation = Flux2Modulation(self.inner_dim, mod_param_sets=1, bias=False, seed=seed)
         
         # Blocks
-        self.transformer_blocks = nn.SequentialStack(
-            JointAttentionBlock, config, num_stack=config.num_layers, seed=seed
+        self.transformer_blocks = nn.SeqStack(
+            JointAttentionBlock(config, seed=seed)
+            for _ in range(config.num_layers)
         )
-        self.single_transformer_blocks = nn.SequentialStack(
-            SingleStreamBlock, config, num_stack=config.num_single_layers, seed=seed
+        self.single_transformer_blocks = nn.SeqStack(
+            SingleStreamBlock(config, seed=seed)
+            for _ in range(config.num_single_layers)
         )
         
         # Output

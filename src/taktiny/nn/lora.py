@@ -15,13 +15,18 @@
 
 import jax
 import jax.numpy as jnp
-import re
 
-from taktiny.nn.module import Module, Parameter, iter_children
+from taktiny.nn.module import Module, Parameter
 from taktiny.nn.rng import Rngs
 
 class LoRALinear(Module):
-    def __init__(self, base_layer: Module, rank: int, alpha: float, seed: Rngs):
+    def __init__(
+        self,
+        base_layer: Module,
+        rank: int,
+        alpha: float,
+        rngs: Rngs,
+    ):
         self.base_layer = base_layer
         self.in_features = getattr(base_layer, 'in_features', None)
         self.out_features = getattr(base_layer, 'out_features', None)
@@ -31,13 +36,11 @@ class LoRALinear(Module):
         if self.in_features is None or self.out_features is None:
             raise ValueError("Base layer must have in_features and out_features attributes.")
             
-        # Detect if base_layer is stacked (used inside SequentialStack)
-        sample_param = getattr(base_layer, 'weight', getattr(base_layer, 'weights_q', None))
+        # Detect if base_layer is stacked (used inside SeqStack)
+        sample_param = getattr(base_layer, 'weight', None)
         if sample_param is not None:
             expected_dims = len(self.in_features) + len(self.out_features)
-            # If it's dynamically quantized, weights_q might have fewer dims due to packing, but it still has an extra leading dim if stacked.
-            # A safer check is if it has more dims than expected, or we can just check if it's 1 dim longer than expected.
-            is_stacked = len(sample_param.shape) > expected_dims or (len(sample_param.shape) > 2 and 'weights_q' in vars(base_layer))
+            is_stacked = len(sample_param.shape) > expected_dims
         else:
             is_stacked = False
             
@@ -47,7 +50,7 @@ class LoRALinear(Module):
         self.in_features_flat = math.prod(self.in_features)
         self.out_features_flat = math.prod(self.out_features)
             
-        w_key = seed()
+        w_key = rngs()
         if is_stacked:
             self.lora_A = Parameter(jax.random.normal(w_key, (num_layers, self.in_features_flat, self.rank), dtype=jnp.float32) * (1 / self.in_features_flat))
             self.lora_B = Parameter(jnp.zeros((num_layers, self.rank, self.out_features_flat), dtype=jnp.float32))
@@ -55,8 +58,8 @@ class LoRALinear(Module):
             self.lora_A = Parameter(jax.random.normal(w_key, (self.in_features_flat, self.rank), dtype=jnp.float32) * (1 / self.in_features_flat))
             self.lora_B = Parameter(jnp.zeros((self.rank, self.out_features_flat), dtype=jnp.float32))
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        base_out = jax.lax.stop_gradient(self.base_layer(x))
+    def __call__(self, x: jax.Array, *args, **kwargs) -> jax.Array:
+        base_out = self.base_layer(x, *args, **kwargs)
         # Flatten the input's feature dimensions to match in_features_flat
         in_dims = len(self.in_features)
         x_flat = x.reshape(x.shape[:-in_dims] + (self.in_features_flat,))
@@ -73,25 +76,4 @@ class LoRALinear(Module):
         return f"rank={self.rank}, alpha={self.scaling * self.rank}"
 
 
-def inject_lora(model: Module, target_modules: list[str], rank: int, alpha: float, seed: Rngs, prefix: str = "") -> Module:
-    """
-    Recursively wraps target modules (e.g. ['q_proj', 'v_proj']) with LoRALinear.
-    """
-    for name, child in iter_children(model):
-        full_name = f"{prefix}.{name}" if prefix else name
-        
-        # Check if the current child is a target module
-        is_target = any(re.search(target, full_name) for target in target_modules)
-        
-        # We only wrap it if it has an __call__ and in_features/out_features
-        if is_target and hasattr(child, 'in_features') and hasattr(child, 'out_features'):
-            # Swap it!
-            lora_layer = LoRALinear(base_layer=child, rank=rank, alpha=alpha, seed=seed)
-            setattr(model, name, lora_layer)
-        elif isinstance(child, Module):
-            # Recurse
-            inject_lora(child, target_modules, rank, alpha, seed, full_name)
-            
-    return model
-
-apply_lora = inject_lora
+__all__ = ['LoRALinear']
