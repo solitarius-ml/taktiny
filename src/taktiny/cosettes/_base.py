@@ -167,8 +167,16 @@ class PretrainedModel(Module):
                 )
 
         # 4. Instantiate model skeleton using eval_shape (no memory allocation)
-        rngs = kwargs.get('rngs', Rngs(0))
-        state = jax.eval_shape(lambda: cls(config, rngs=rngs, mesh=mesh, sharding_rules=sharding_rules))
+        rngs = kwargs.pop('rngs', Rngs(0))
+        state = jax.eval_shape(
+            lambda: cls(
+                config,
+                rngs=rngs,
+                mesh=mesh,
+                sharding_rules=sharding_rules,
+                **kwargs,
+            )
+        )
         current_state_dict = state.flat_parameter_dict()
         new_state = {}
         not_found_some = False
@@ -338,7 +346,7 @@ class PretrainedModel(Module):
                         )
 
                     else:
-                        # Check if it belongs to a SequentialStack
+                        # Check if it belongs to a SeqStack
                         match = re.search(r'\.(\d+)\.', k_mapped)
                         if match:
                             idx = int(match.group(1))
@@ -362,7 +370,7 @@ class PretrainedModel(Module):
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
-        # Move accumulated SequentialStack weights to JAX
+        # Move accumulated SeqStack weights to JAX
         for k_stacked, stacked_array in stacked_states.items():
             target_var = current_state_dict[k_stacked]
             new_state[k_stacked] = materialize_parameter(

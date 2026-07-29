@@ -28,6 +28,7 @@ class Llama(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -39,8 +40,8 @@ class Llama(TransformerCausalLM):
             norm=nn.RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
-
 
 class Llama4(TransformerMM):
     def __init__(self):

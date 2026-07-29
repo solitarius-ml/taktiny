@@ -26,6 +26,7 @@ from taktiny.takt import LoraConfig, PeftConfig, Takt
 from taktiny.trainer.trainer import Trainer
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
 from taktiny import nn
+from taktiny import transforms as tt
 
 from taktiny.maestro.opus import *
 
@@ -38,4 +39,6 @@ __all__ = [
     'Trainer',
     'TrainingConfig',
     'DatasetConfig',
+    'tt',
+    'nn'
 ]

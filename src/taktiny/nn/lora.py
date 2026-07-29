@@ -36,7 +36,7 @@ class LoRALinear(Module):
         if self.in_features is None or self.out_features is None:
             raise ValueError("Base layer must have in_features and out_features attributes.")
             
-        # Detect if base_layer is stacked (used inside SequentialStack)
+        # Detect if base_layer is stacked (used inside SeqStack)
         sample_param = getattr(base_layer, 'weight', None)
         if sample_param is not None:
             expected_dims = len(self.in_features) + len(self.out_features)

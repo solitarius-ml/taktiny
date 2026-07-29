@@ -388,9 +388,9 @@ class TransformerModel(nn.Module):
     """Token embedding followed by a list of transformer decoder layers.
 
     The supplied decoder type is instantiated ``config.num_hidden_layers``
-    times and stored in an ``nn.List``. Each layer owns independent parameters
-    initialized from the shared RNG stream. During a forward pass, a stacked KV
-    cache is sliced by layer and rebuilt with the updated per-layer cache values.
+    times. Each layer owns independent parameters initialized from the shared
+    RNG stream. During a forward pass, a stacked KV cache is sliced by layer and
+    rebuilt with the updated per-layer cache values.
 
     Args:
         config: Model configuration containing ``num_hidden_layers``,
@@ -400,13 +400,15 @@ class TransformerModel(nn.Module):
             zero-based ``layer_idx`` when instantiated.
         embedding: Embedding ``nn.Module`` subclass or initialized instance.
         norm: Optional final normalization module type or instance.
+        compact: Store decoder layers in an ``nn.SeqStack`` and execute them
+            with ``scan`` instead of storing them in an ``nn.List``.
 
     Returns:
         A tuple containing the final hidden states and an updated stacked
         ``(key_cache, value_cache)``, or ``None`` when caching is disabled.
     """
 
-    def __init__(self, config, *, rngs, module, embedding, norm=None):
+    def __init__(self, config, *, rngs, module, embedding, norm=None, compact=False):
         num_hidden_layers = getattr(config, 'num_hidden_layers', None)
         vocab_size = getattr(config, 'vocab_size', None)
         hidden_size = getattr(config, 'hidden_size', None)
@@ -450,12 +452,24 @@ class TransformerModel(nn.Module):
         if hasattr(self.embed_tokens, 'embedding'):
             self.embed_tokens.embedding.axis_names = ('vocab', 'embed')
 
-        self.layers = nn.List(
-            *(
-                module(config, rngs=rngs, layer_idx=layer_idx)
-                for layer_idx in range(num_hidden_layers)
+        self.compact = compact
+        if compact:
+            def compact_layers():
+                for layer_idx in range(num_hidden_layers):
+                    layer = module(config, rngs=rngs, layer_idx=layer_idx)
+                    layer.layer_idx = None
+                    yield layer
+
+            self.layers = nn.SeqStack(
+                compact_layers()
             )
-        )
+        else:
+            self.layers = nn.List(
+                *(
+                    module(config, rngs=rngs, layer_idx=layer_idx)
+                    for layer_idx in range(num_hidden_layers)
+                )
+            )
 
         self.norm = None
         if isinstance(norm, nn.Module):
@@ -504,35 +518,70 @@ class TransformerModel(nn.Module):
                     'value cache must have one entry for each transformer layer'
                 )
 
-        new_key_cache = []
-        new_value_cache = []
-        for layer_idx, layer in enumerate(self.layers):
-            layer_cache = None
-            if kv_cache is not None:
-                layer_cache = (
-                    key_cache[layer_idx],
-                    value_cache[layer_idx],
+        if self.compact:
+            def apply_layer(layer, carry):
+                hidden_states, layer_idx = carry
+                layer_cache = None
+                if kv_cache is not None:
+                    layer_cache = (
+                        jax.lax.dynamic_index_in_dim(
+                            key_cache,
+                            layer_idx,
+                            axis=0,
+                            keepdims=False,
+                        ),
+                        jax.lax.dynamic_index_in_dim(
+                            value_cache,
+                            layer_idx,
+                            axis=0,
+                            keepdims=False,
+                        ),
+                    )
+
+                hidden_states, updated_cache = layer(
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    kv_cache=layer_cache,
+                    position_idx=position_idx,
+                    is_causal=is_causal,
+                    out_sharding=out_sharding,
+                )
+                return (hidden_states, layer_idx + 1), updated_cache
+
+            (x, _), new_cache = self.layers(
+                apply_layer,
+                (x, jnp.asarray(0, dtype=jnp.int32)),
+            )
+        else:
+            new_key_cache = []
+            new_value_cache = []
+            for layer_idx, layer in enumerate(self.layers):
+                layer_cache = None
+                if kv_cache is not None:
+                    layer_cache = (
+                        key_cache[layer_idx],
+                        value_cache[layer_idx],
+                    )
+
+                x, new_cache = layer(
+                    x,
+                    attention_mask=attention_mask,
+                    kv_cache=layer_cache,
+                    position_idx=position_idx,
+                    is_causal=is_causal,
+                    out_sharding=out_sharding,
                 )
 
-            x, new_cache = layer(
-                x,
-                attention_mask=attention_mask,
-                kv_cache=layer_cache,
-                position_idx=position_idx,
-                is_causal=is_causal,
-                out_sharding=out_sharding,
-            )
+                if new_cache is not None:
+                    new_key_cache.append(new_cache[0])
+                    new_value_cache.append(new_cache[1])
 
-            if new_cache is not None:
-                new_key_cache.append(new_cache[0])
-                new_value_cache.append(new_cache[1])
-
-        new_cache = None
-        if new_key_cache:
-            new_cache = (
-                jnp.stack(new_key_cache),
-                jnp.stack(new_value_cache),
-            )
+            new_cache = None
+            if new_key_cache:
+                new_cache = (
+                    jnp.stack(new_key_cache),
+                    jnp.stack(new_value_cache),
+                )
 
         if self.norm is not None:
             if isinstance(self.norm, nn.RMSNorm):
@@ -593,7 +642,8 @@ class TransformerCausalLM(PretrainedModel):
         norm = None,
         lm_head = None,
         mesh: jax.sharding.Mesh = None,
-        sharding_rules: Optional[List[Tuple]] = None
+        sharding_rules: Optional[List[Tuple]] = None,
+        compact = False
     ):
         if decoder is None:
             raise ValueError('decoder is required')
@@ -625,6 +675,7 @@ class TransformerCausalLM(PretrainedModel):
             module=decoder,
             embedding=embedding,
             norm=norm,
+            compact=compact
         )
 
         tied = getattr(config, 'tie_word_embeddings', None) # maybe
