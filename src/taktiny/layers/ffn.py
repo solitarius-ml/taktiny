@@ -104,7 +104,7 @@ class FusedGateMLP(Module):
         **kwargs,
     ) -> jax.Array:
         """Apply Megablox Grouped Matrix Multiply (GMM) kernel."""
-        from taktiny.kernel.megablox import gmm
+        from taktiny.kernels.megablox import gmm
         return gmm(lhs, rhs, group_sizes, transpose_rhs=transpose_rhs, **kwargs)
 
     @classmethod
@@ -117,7 +117,7 @@ class FusedGateMLP(Module):
         **kwargs,
     ) -> tuple[jax.Array, jax.Array]:
         """Apply MoE activation sorting/routing kernel."""
-        from taktiny.kernel.sort_activations import route
+        from taktiny.kernels.sort_activations import route
         indices_2d = indices[:, None] if indices.ndim == 1 else indices
         sorted_x = route(x, indices_2d, use_gather_mosaic_kernel)
         if num_groups is not None:
@@ -135,7 +135,7 @@ class FusedGateMLP(Module):
         **kwargs,
     ) -> jax.Array:
         """Apply MoE activation un-sorting/un-routing kernel."""
-        from taktiny.kernel.sort_activations import unroute
+        from taktiny.kernels.sort_activations import unroute
         indices_2d = indices[:, None] if indices.ndim == 1 else indices
         return unroute(x, indices_2d, use_gather_mosaic_kernel)
 
@@ -149,6 +149,7 @@ class FusedGateMLP(Module):
         **kwargs,
     ) -> jax.Array:
         """Unified entry point for MoE GMM kernel application."""
+        kernel = kernel.lower()
         if kernel == "gmm":
             return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)
         else:
@@ -184,7 +185,7 @@ class MoeFFN(Module):
         **kwargs,
     ) -> jax.Array:
         """Apply Megablox Grouped Matrix Multiply (GMM) kernel."""
-        from taktiny.kernel.megablox import gmm
+        from taktiny.kernels.megablox import gmm
         return gmm(lhs, rhs, group_sizes, transpose_rhs=transpose_rhs, **kwargs)
 
     @classmethod
@@ -197,7 +198,7 @@ class MoeFFN(Module):
         **kwargs,
     ) -> tuple[jax.Array, jax.Array]:
         """Apply MoE activation sorting/routing kernel."""
-        from taktiny.kernel.sort_activations import route
+        from taktiny.kernels.sort_activations import route
         indices_2d = indices[:, None] if indices.ndim == 1 else indices
         sorted_x = route(x, indices_2d, use_gather_mosaic_kernel)
         if num_groups is not None:
@@ -215,7 +216,7 @@ class MoeFFN(Module):
         **kwargs,
     ) -> jax.Array:
         """Apply MoE activation un-sorting/un-routing kernel."""
-        from taktiny.kernel.sort_activations import unroute
+        from taktiny.kernels.sort_activations import unroute
         indices_2d = indices[:, None] if indices.ndim == 1 else indices
         return unroute(x, indices_2d, use_gather_mosaic_kernel)
 
@@ -229,6 +230,7 @@ class MoeFFN(Module):
         **kwargs,
     ) -> jax.Array:
         """Unified entry point for MoE GMM kernel application."""
+        kernel = kernel.lower()
         if kernel == "gmm":
             return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)
         else:

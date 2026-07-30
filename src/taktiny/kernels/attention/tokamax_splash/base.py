@@ -20,7 +20,7 @@ from typing import Final, NamedTuple, TypeAlias
 import jax
 import jax.numpy as jnp
 import numpy as np
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
 
 
 MaskInfo = mask_info_lib.MaskInfo

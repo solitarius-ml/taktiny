@@ -11,22 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Ragged tensor kernels (gather, gather-reduce, sort, unsort)."""
+"""Megablox MoE Grouped Matrix Multiply (GMM) kernels."""
 
-from taktiny.kernel.ragged.ragged_gather import ragged_gather
-from taktiny.kernel.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
-from taktiny.kernel.ragged.ragged_sort import (
-    ring_ragged_sort,
-    ring_ragged_unsort,
-    a2a_ragged_sort,
-    a2a_ragged_unsort,
-)
+from taktiny.kernels.megablox.ops import gmm
 
-__all__ = [
-    "ragged_gather",
-    "ragged_gather_reduce",
-    "ring_ragged_sort",
-    "ring_ragged_unsort",
-    "a2a_ragged_sort",
-    "a2a_ragged_unsort",
-]
+__all__ = ["gmm"]

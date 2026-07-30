@@ -27,7 +27,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-from taktiny.kernel.megablox import gmm_kernel as gmm_v2
+from taktiny.kernels.megablox import gmm_kernel as gmm_v2
 
 
 @jax.tree_util.register_dataclass

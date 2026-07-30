@@ -312,6 +312,111 @@ trainer = Trainer(
 trainer.train()
 ```
 
+When no dataloader is supplied, `DatasetConfig` can load a Hugging Face
+dataset. `process_fn` runs once on the loaded dataset and may return either
+train data or a `(train, validation)` pair. Non-streaming data is exposed
+through resumable Grain iterators; streaming data remains an HF iterable.
+
+```python
+dataset_config = DatasetConfig(
+    repo_id='open-r1/OpenThoughts-114k-math',
+    process_fn=prepare_dataset,
+    streaming=False,
+)
+```
+
+For gated repositories, `HF_TOKEN` takes precedence over `hf_token`. Repository
+loading, token resolution, preprocessing, and Grain wrapping are all skipped
+when `dataloader` is supplied explicitly.
+
+### Supervised Fine-Tuning
+
+`SFTTrainer` specializes the same training loop with causal language-model
+loss, tokenization, dynamic padding, and optional sequence packing:
+
+```python
+from transformers import AutoTokenizer
+
+from taktiny import SFTDatasetConfig, SFTTrainer, SFTTrainerConfig
+
+tokenizer = AutoTokenizer.from_pretrained(model_repo)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+trainer = SFTTrainer(
+    model,
+    training_config=SFTTrainerConfig(
+        epochs=1,
+        learning_rate=2e-4,
+        assistant_only_loss=True,
+        jit_compile=True,
+    ),
+    dataset_config=SFTDatasetConfig(
+        repo_id='open-r1/OpenThoughts-114k-math',
+        tokenizer=tokenizer,
+        process_fn=prepare_open_thoughts,
+        batch_size=8,
+        max_length=1024,
+        padding='longest',
+        packing=False,
+    ),
+)
+trainer.train()
+```
+
+Supported records contain one of:
+
+- `input_ids`, with optional `labels` and `attention_mask`
+- `text`
+- `messages`
+- `prompt` and `completion`
+
+Prompt-completion records use completion-only loss by default. Conversational
+records can use `assistant_only_loss=True`; explicit pretokenized `labels`
+always take precedence. Set `packing=True` to fill fixed-length sequences.
+Packed examples receive block-diagonal attention masks, so examples in the same
+sequence cannot attend to each other.
+
+`process_fn` runs once on a dataset loaded through `repo_id`. Use
+`formatting_fn` for per-record conversion. Set `skip_prepare_dataset=True` only
+when the supplied dataloader already yields complete SFT batches containing
+`input_ids`, `attention_mask`, and `labels`.
+
+Rematerialization is configured on models that understand their own layer
+boundaries:
+
+```python
+model.enable_remat()
+trainer.train()
+```
+
+Scheduled checkpoints can preserve exact stochastic and dataloader progress:
+
+```python
+training_config = TrainingConfig(
+    seed=42,
+    output_dir='checkpoints/run',
+    save_steps=100,
+    save_async=True,
+)
+```
+
+`save_async=True` captures a stable host snapshot and overlaps its
+serialization with later training. Checkpoints are first written to a sibling
+temporary directory and become visible only after an atomic rename. Single-host
+checkpoints use portable Safetensors, including lossless Qwix component
+metadata. Multi-host jobs collectively save distributed model and optimizer
+state with Orbax, while RNG and stateful-dataloader cursors are stored per host.
+
+Loss functions that use dropout or another stochastic operation may opt into
+the Trainer RNG without changing deterministic loss functions:
+
+```python
+def loss_fn(model, batch, *, rng):
+    logits = model(batch['input_ids'], rng=rng)
+    return cross_entropy(logits, batch['labels'])
+```
+
 Callbacks and validation metrics can be added without changing the training
 step:
 
@@ -336,6 +441,12 @@ trainer = Trainer(
 Callback objects may implement any of `on_step_end`, `on_log`, `on_save`, or
 `on_evaluate`. TensorBoard and W&B dependencies remain optional and are
 available through the `tensorboard`, `wandb`, or `reporting` package extras.
+
+Trainer consumes the supplied dataloader directly. At each epoch it uses the
+first available `set_epoch` hook on the dataloader, its sampler, or its
+dataset. Iterators exposing both `get_state` and `set_state` are checkpointed
+as bytes or JSON and restored without replaying consumed batches. Other
+iterators retain the epoch-and-batch-position resume fallback.
 
 The trainer currently uses heuristic parameter freezing for large and
 quantized parameters. Review the trainable parameter set before using it for a

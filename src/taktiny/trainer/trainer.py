@@ -16,16 +16,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+import copy
 from itertools import islice
+import inspect
 import json
 import math
 import os
 import re
 import shutil
+import uuid
 
 import jax
+import numpy as np
 import qwix
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
+from taktiny.nn import Rngs
 from taktiny.nn.module import Module, Parameter
 
 import jax.numpy as jnp
@@ -227,6 +233,108 @@ def _format_iteration_time(seconds):
     return f'{seconds / 60:.1f} min/it'
 
 
+class _GrainEpochLoader:
+    """Build one resumable Grain loader for the selected epoch."""
+
+    def __init__(self, source, *, shuffle, seed):
+        if not (
+            callable(getattr(source, '__len__', None))
+            and callable(getattr(source, '__getitem__', None))
+        ):
+            raise TypeError(
+                'Non-streaming process_fn output must support __len__ and '
+                '__getitem__ so Grain can read it'
+            )
+        self.source = source
+        self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self):
+        size = len(self.source)
+        process_count = jax.process_count()
+        process_index = jax.process_index()
+        return max(
+            0,
+            (size + process_count - 1 - process_index) // process_count,
+        )
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        import grain
+
+        dataloader = grain.load(
+            self.source,
+            num_epochs=1,
+            shuffle=self.shuffle,
+            seed=(self.seed + self.epoch) % (2 ** 32),
+            shard_options=grain.sharding.ShardByJaxProcess(),
+        )
+        return iter(dataloader)
+
+
+def _split_loaded_dataset(dataset):
+    if isinstance(dataset, tuple):
+        if len(dataset) != 2:
+            raise ValueError(
+                'process_fn tuple output must contain '
+                '(train, validation)'
+            )
+        return dataset
+
+    if isinstance(dataset, Mapping):
+        if 'train' not in dataset:
+            raise ValueError(
+                'Loaded dataset has no "train" split; process_fn must '
+                'return train data or (train, validation)'
+            )
+        validation = dataset.get('validation')
+        return dataset['train'], validation
+
+    return dataset, None
+
+
+def _load_dataset_splits(config):
+    from datasets import load_dataset
+
+    token = os.environ.get('HF_TOKEN') or config.hf_token
+    dataset = load_dataset(
+        config.repo_id,
+        streaming=config.streaming,
+        token=token,
+    )
+    if config.process_fn is not None:
+        dataset = config.process_fn(dataset)
+
+    train, loaded_validation = _split_loaded_dataset(dataset)
+    validation = config.validation_dataloader
+    if validation is None:
+        validation = loaded_validation
+    return train, validation
+
+
+def _load_dataset_from_repo(config):
+    train, validation = _load_dataset_splits(config)
+
+    if config.streaming:
+        return train, validation
+
+    train = _GrainEpochLoader(
+        train,
+        shuffle=config.shuffle,
+        seed=config.seed,
+    )
+    if validation is not None and validation is not config.validation_dataloader:
+        validation = _GrainEpochLoader(
+            validation,
+            shuffle=False,
+            seed=config.seed,
+        )
+    return train, validation
+
+
 class Trainer:
     def __init__(
         self,
@@ -242,6 +350,16 @@ class Trainer:
         self.loss_fn = loss_fn
         self.training_config = training_config
         self.dataset_config = dataset_config
+        if dataset_config.dataloader is None:
+            (
+                self._train_dataloader,
+                self._validation_dataloader,
+            ) = _load_dataset_from_repo(dataset_config)
+        else:
+            self._train_dataloader = dataset_config.dataloader
+            self._validation_dataloader = (
+                dataset_config.validation_dataloader
+            )
         self.compute_metrics = compute_metrics
         if compute_metrics is not None and not callable(compute_metrics):
             raise TypeError('compute_metrics must be callable or None')
@@ -276,6 +394,66 @@ class Trainer:
         self.micro_step = 0
         self.last_grad_norm = None
         self.last_update_skipped = False
+        self._active_data_iterator = None
+        self.rngs = Rngs(self.training_config.seed)
+        self._loss_accepts_rng = self._callable_accepts_rng(loss_fn)
+        self._checkpoint_executor = None
+        self._pending_checkpoint = None
+
+    @staticmethod
+    def _callable_accepts_rng(function):
+        try:
+            signature = inspect.signature(function)
+        except (TypeError, ValueError):
+            return False
+        parameter = signature.parameters.get('rng')
+        if parameter is not None:
+            return parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+        return any(
+            value.kind is inspect.Parameter.VAR_KEYWORD
+            for value in signature.parameters.values()
+        )
+
+    @staticmethod
+    def _rng_state_path(checkpoint_path):
+        if jax.process_count() == 1:
+            filename = 'rng_state.json'
+        else:
+            filename = f'rng_state-{jax.process_index():05d}.json'
+        return os.path.join(checkpoint_path, filename)
+
+    def _capture_rng_state(self):
+        return {
+            'impl': str(jax.random.key_impl(self.rngs.key)),
+            'key_data': np.asarray(
+                jax.device_get(jax.random.key_data(self.rngs.key))
+            ).tolist(),
+        }
+
+    def _save_rng_state(self, checkpoint_path, state=None):
+        if state is None:
+            state = self._capture_rng_state()
+        state_path = self._rng_state_path(checkpoint_path)
+        with open(state_path, 'w') as state_file:
+            json.dump(state, state_file, indent=2)
+        return state_path
+
+    def _restore_rng_state(self, checkpoint_path):
+        state_path = self._rng_state_path(checkpoint_path)
+        if not os.path.isfile(state_path):
+            return False
+        with open(state_path) as state_file:
+            state = json.load(state_file)
+        impl = state.get('impl')
+        key_data = state.get('key_data')
+        if not isinstance(impl, str) or not isinstance(key_data, list):
+            raise ValueError('Checkpoint RNG state is invalid')
+        key = jax.random.wrap_key_data(
+            jnp.asarray(key_data, dtype=jnp.uint32),
+            impl=impl,
+        )
+        self.rngs = Rngs(key)
+        return True
 
     def add_callback(self, callback):
         """Append a callback and return it."""
@@ -292,6 +470,113 @@ class Trainer:
             method = getattr(callback, event, None)
             if callable(method):
                 method(self, **kwargs)
+
+    @staticmethod
+    def _set_dataloader_epoch(dataloader, epoch):
+        candidates = (
+            dataloader,
+            getattr(dataloader, 'sampler', None),
+            getattr(dataloader, 'dataset', None),
+        )
+        for candidate in candidates:
+            set_epoch = getattr(candidate, 'set_epoch', None)
+            if callable(set_epoch):
+                set_epoch(epoch)
+                return True
+        return False
+
+    @staticmethod
+    def _has_iterator_state(iterator):
+        return (
+            callable(getattr(iterator, 'get_state', None))
+            and callable(getattr(iterator, 'set_state', None))
+        )
+
+    @staticmethod
+    def _dataloader_state_paths(checkpoint_path):
+        suffix = (
+            ''
+            if jax.process_count() == 1
+            else f'-{jax.process_index():05d}'
+        )
+        return (
+            os.path.join(
+                checkpoint_path,
+                f'dataloader_state{suffix}.bin',
+            ),
+            os.path.join(
+                checkpoint_path,
+                f'dataloader_state{suffix}.json',
+            ),
+        )
+
+    def _capture_dataloader_state(self):
+        iterator = self._active_data_iterator
+        if iterator is None or not self._has_iterator_state(iterator):
+            return None
+
+        state = iterator.get_state()
+        if isinstance(state, (bytes, bytearray, memoryview)):
+            return ('bytes', bytes(state))
+        try:
+            json.dumps(state)
+        except (TypeError, ValueError) as error:
+            raise TypeError(
+                'Dataloader iterator get_state() must return bytes or '
+                'JSON-serializable data'
+            ) from error
+        return ('json', state)
+
+    def _save_dataloader_state(self, checkpoint_path, snapshot=None):
+        if snapshot is None:
+            snapshot = self._capture_dataloader_state()
+        if snapshot is None:
+            return None
+
+        state_format, state = snapshot
+        binary_path, json_path = self._dataloader_state_paths(
+            checkpoint_path
+        )
+        if state_format == 'bytes':
+            with open(binary_path, 'wb') as state_file:
+                state_file.write(state)
+            if os.path.isfile(json_path):
+                os.remove(json_path)
+            return binary_path
+
+        with open(json_path, 'w') as state_file:
+            json.dump(state, state_file)
+        if os.path.isfile(binary_path):
+            os.remove(binary_path)
+        return json_path
+
+    def _restore_dataloader_state(self, iterator, checkpoint_path):
+        binary_path, json_path = self._dataloader_state_paths(
+            checkpoint_path
+        )
+        existing_paths = [
+            path
+            for path in (binary_path, json_path)
+            if os.path.isfile(path)
+        ]
+        if not existing_paths:
+            return False
+        if len(existing_paths) != 1:
+            raise ValueError(
+                'Resume checkpoint contains multiple dataloader states'
+            )
+        if not self._has_iterator_state(iterator):
+            return False
+
+        state_path = existing_paths[0]
+        if state_path == binary_path:
+            with open(state_path, 'rb') as state_file:
+                state = state_file.read()
+        else:
+            with open(state_path) as state_file:
+                state = json.load(state_file)
+        iterator.set_state(state)
+        return True
 
     @staticmethod
     def _validate_callback(callback):
@@ -406,7 +691,7 @@ class Trainer:
         )
 
     def _evaluate_params(self, params):
-        dataloader = self.dataset_config.validation_dataloader
+        dataloader = self._validation_dataloader
         if dataloader is None:
             raise ValueError(
                 'validation_dataloader is required for evaluation'
@@ -415,29 +700,49 @@ class Trainer:
         losses = []
         metric_values = {}
         expected_metric_names = None
+        evaluation_rng = jax.random.fold_in(
+            jax.random.key(self.training_config.seed),
+            self.global_step,
+        )
         batches = _prefetch(
             dataloader,
             self._place_batch,
             self.dataset_config.prefetch_size,
         )
         for batch in batches:
+            evaluation_rng, batch_rng = jax.random.split(evaluation_rng)
             if (
                 self._compiled_eval_step is None
                 and self.training_config.jit_compile
             ):
+                def evaluate_loss(candidate, value, rng):
+                    if self._loss_accepts_rng:
+                        return self.loss_fn(
+                            candidate,
+                            value,
+                            rng=rng,
+                        )
+                    return self.loss_fn(candidate, value)
+
                 self._compiled_eval_step = jax.jit(
-                    lambda candidate, value: self.loss_fn(
-                        candidate,
-                        value,
-                    ),
+                    evaluate_loss,
                     in_shardings=(
                         _tree_shardings(params),
                         _tree_shardings(batch),
+                        None,
                     ),
                     out_shardings=None,
                 )
-            eval_step = self._compiled_eval_step or self.loss_fn
-            value = eval_step(params, batch)
+            if self._compiled_eval_step is not None:
+                value = self._compiled_eval_step(
+                    params,
+                    batch,
+                    batch_rng,
+                )
+            elif self._loss_accepts_rng:
+                value = self.loss_fn(params, batch, rng=batch_rng)
+            else:
+                value = self.loss_fn(params, batch)
             if isinstance(value, jax.Array):
                 value = value.item()
             losses.append(float(value))
@@ -661,6 +966,30 @@ class Trainer:
         return state
 
     def _load_checkpoint_model(self, checkpoint_path):
+        model_state_path = os.path.join(
+            checkpoint_path,
+            'model_state',
+        )
+        if os.path.isdir(model_state_path):
+            import orbax.checkpoint as ocp
+
+            if not isinstance(self.model, Module):
+                raise TypeError(
+                    'Distributed model-state checkpoints currently require '
+                    'a Taktiny Module'
+                )
+            target = self.model.flat_state_dict()
+            checkpointer = ocp.StandardCheckpointer()
+            try:
+                restored = checkpointer.restore(
+                    model_state_path,
+                    target=target,
+                )
+            finally:
+                checkpointer.close()
+            self.model.load_flat_state_dict(restored)
+            return
+
         adapter_config = os.path.join(
             checkpoint_path,
             'adapter_config.json',
@@ -723,31 +1052,216 @@ class Trainer:
         step,
         epoch,
         step_in_epoch,
+        state=None,
     ):
+        if state is None:
+            state = self._trainer_state(
+                step=step,
+                epoch=epoch,
+                step_in_epoch=step_in_epoch,
+            )
         trainer_state_path = os.path.join(
             checkpoint_path,
             'trainer_state.json',
         )
-        with open(trainer_state_path, 'w') as trainer_state_file:
-            json.dump(
-                {
-                    'global_step': step,
-                    'epoch': epoch,
-                    'step_in_epoch': step_in_epoch,
-                    'log_history': self.log_history,
-                    'best_metric': self.best_metric,
-                    'best_model_checkpoint': self.best_model_checkpoint,
-                    'gradient_accumulation_steps': (
-                        self.training_config.gradient_accumulation_steps
-                    ),
-                    'loss_scale': self.loss_scale,
-                    'loss_scale_good_steps': self.loss_scale_good_steps,
-                    'skipped_updates': self.skipped_updates,
-                    'micro_step': self.micro_step,
-                },
-                trainer_state_file,
-                indent=2,
+        temporary_path = (
+            f'{trainer_state_path}.tmp-{uuid.uuid4().hex}'
+        )
+        try:
+            with open(temporary_path, 'w') as trainer_state_file:
+                json.dump(state, trainer_state_file, indent=2)
+                trainer_state_file.flush()
+                os.fsync(trainer_state_file.fileno())
+            os.replace(temporary_path, trainer_state_path)
+        finally:
+            if os.path.isfile(temporary_path):
+                os.remove(temporary_path)
+
+    def _trainer_state(self, *, step, epoch, step_in_epoch):
+        return {
+            'global_step': step,
+            'epoch': epoch,
+            'step_in_epoch': step_in_epoch,
+            'log_history': copy.deepcopy(self.log_history),
+            'best_metric': self.best_metric,
+            'best_model_checkpoint': self.best_model_checkpoint,
+            'gradient_accumulation_steps': (
+                self.training_config.gradient_accumulation_steps
+            ),
+            'loss_scale': self.loss_scale,
+            'loss_scale_good_steps': self.loss_scale_good_steps,
+            'skipped_updates': self.skipped_updates,
+            'micro_step': self.micro_step,
+        }
+
+    @staticmethod
+    def _host_snapshot(tree):
+        def copy_leaf(value):
+            value = jax.device_get(value)
+            if isinstance(value, np.ndarray):
+                return np.array(value, copy=True)
+            return copy.deepcopy(value)
+
+        return jax.tree.map(copy_leaf, tree)
+
+    @staticmethod
+    def _sync_hosts(name):
+        if jax.process_count() <= 1:
+            return
+        from jax.experimental import multihost_utils
+
+        multihost_utils.sync_global_devices(name)
+
+    def _finalize_checkpoint(self, checkpoint_path):
+        if jax.process_index() == 0:
+            if checkpoint_path not in self.saved_checkpoints:
+                self.saved_checkpoints.append(checkpoint_path)
+            self._rotate_checkpoints()
+            self._call_event(
+                'on_save',
+                checkpoint_path=checkpoint_path,
             )
+        self._sync_hosts(
+            f'taktiny-checkpoint-finalize-{os.path.basename(checkpoint_path)}'
+        )
+        if jax.process_count() > 1:
+            self.saved_checkpoints = [
+                path for _, path in self._checkpoint_paths()
+            ]
+
+    def _write_checkpoint_directory(
+        self,
+        temporary_path,
+        checkpoint_path,
+        *,
+        model_snapshot,
+        optimizer_state,
+        dataloader_state,
+        rng_state,
+        trainer_state,
+    ):
+        is_primary = jax.process_index() == 0
+        is_multihost = jax.process_count() > 1
+        barrier_name = os.path.basename(checkpoint_path)
+
+        try:
+            if is_primary:
+                if os.path.exists(temporary_path):
+                    shutil.rmtree(temporary_path)
+                os.makedirs(temporary_path)
+            self._sync_hosts(f'taktiny-checkpoint-open-{barrier_name}')
+
+            if is_multihost:
+                if not isinstance(self.model, Module):
+                    raise TypeError(
+                        'Multi-host checkpoints currently require a '
+                        'Taktiny Module'
+                    )
+                import orbax.checkpoint as ocp
+
+                model_state_path = os.path.join(
+                    temporary_path,
+                    'model_state',
+                )
+                checkpointer = ocp.StandardCheckpointer()
+                try:
+                    checkpointer.save(
+                        model_state_path,
+                        self.model.flat_state_dict(),
+                        force=True,
+                    )
+                    checkpointer.wait_until_finished()
+                finally:
+                    checkpointer.close()
+                if is_primary:
+                    save_config = getattr(self.model, '_save_config', None)
+                    if callable(save_config):
+                        save_config(temporary_path)
+            elif is_primary:
+                if model_snapshot is None:
+                    self.model.save_pretrained(
+                        temporary_path,
+                        max_shard_size=(
+                            self.training_config.max_shard_size
+                        ),
+                    )
+                else:
+                    self.model._save_pretrained_snapshot(
+                        model_snapshot,
+                        temporary_path,
+                        max_shard_size=(
+                            self.training_config.max_shard_size
+                        ),
+                    )
+            self._sync_hosts(f'taktiny-checkpoint-model-{barrier_name}')
+
+            if dataloader_state is not None:
+                self._save_dataloader_state(
+                    temporary_path,
+                    dataloader_state,
+                )
+            self._save_rng_state(temporary_path, rng_state)
+
+            if self.training_config.save_optimizer_state:
+                import orbax.checkpoint as ocp
+
+                optimizer_path = os.path.join(
+                    temporary_path,
+                    'optimizer_state',
+                )
+                checkpointer = ocp.StandardCheckpointer()
+                try:
+                    checkpointer.save(
+                        optimizer_path,
+                        optimizer_state,
+                        force=True,
+                    )
+                    checkpointer.wait_until_finished()
+                finally:
+                    checkpointer.close()
+
+            self._sync_hosts(f'taktiny-checkpoint-data-{barrier_name}')
+            if is_primary:
+                self._write_trainer_state(
+                    temporary_path,
+                    step=trainer_state['global_step'],
+                    epoch=trainer_state['epoch'],
+                    step_in_epoch=trainer_state['step_in_epoch'],
+                    state=trainer_state,
+                )
+            self._sync_hosts(f'taktiny-checkpoint-close-{barrier_name}')
+
+            if is_primary:
+                if os.path.exists(checkpoint_path):
+                    raise FileExistsError(
+                        f'Checkpoint already exists: {checkpoint_path}'
+                    )
+                os.replace(temporary_path, checkpoint_path)
+            self._sync_hosts(f'taktiny-checkpoint-publish-{barrier_name}')
+            return checkpoint_path
+        except BaseException:
+            if is_primary and os.path.isdir(temporary_path):
+                shutil.rmtree(temporary_path)
+            if not is_multihost:
+                raise
+            # Other hosts may already be waiting at a collective. Preserve the
+            # original exception on the failing host rather than masking it.
+            raise
+
+    def _drain_pending_checkpoint(self):
+        if self._pending_checkpoint is None:
+            return None
+        checkpoint_path, future = self._pending_checkpoint
+        self._pending_checkpoint = None
+        try:
+            future.result()
+        except BaseException:
+            if self._checkpoint_executor is not None:
+                self._checkpoint_executor.shutdown(wait=True)
+                self._checkpoint_executor = None
+            raise
+        self._finalize_checkpoint(checkpoint_path)
+        return checkpoint_path
 
     def _save_checkpoint(
         self,
@@ -759,53 +1273,88 @@ class Trainer:
         epoch,
         step_in_epoch,
     ):
-        save_pretrained = getattr(self.model, 'save_pretrained', None)
-        if not callable(save_pretrained):
+        supports_checkpoint = (
+            callable(getattr(self.model, 'save_pretrained', None))
+            or (
+                jax.process_count() > 1
+                and isinstance(self.model, Module)
+            )
+        )
+        if not supports_checkpoint:
             raise TypeError(
                 f'{type(self.model).__name__} does not support '
                 'save_pretrained checkpoints'
             )
 
+        self._drain_pending_checkpoint()
         self._inject_params(
             _combine_params(trainable_params, frozen_params)
         )
         checkpoint_path = self._checkpoint_directory(step)
-        save_pretrained(
-            checkpoint_path,
-            max_shard_size=self.training_config.max_shard_size,
-        )
-
-        if self.training_config.save_optimizer_state:
-            import orbax.checkpoint as ocp
-
-            optimizer_path = os.path.join(
-                checkpoint_path,
-                'optimizer_state',
+        if jax.process_count() > 1:
+            temporary_path = f'{checkpoint_path}.tmp'
+        else:
+            temporary_path = (
+                f'{checkpoint_path}.tmp-{uuid.uuid4().hex}'
             )
-            checkpointer = ocp.StandardCheckpointer()
-            try:
-                checkpointer.save(
-                    optimizer_path,
-                    opt_state,
-                    force=True,
-                )
-                checkpointer.wait_until_finished()
-            finally:
-                checkpointer.close()
-
-        self._write_trainer_state(
-            checkpoint_path,
+        dataloader_state = self._capture_dataloader_state()
+        rng_state = self._capture_rng_state()
+        trainer_state = self._trainer_state(
             step=step,
             epoch=epoch,
             step_in_epoch=step_in_epoch,
         )
 
-        self.saved_checkpoints.append(checkpoint_path)
-        self._rotate_checkpoints()
-        self._call_event(
-            'on_save',
-            checkpoint_path=checkpoint_path,
+        use_async = (
+            self.training_config.save_async
+            and jax.process_count() == 1
         )
+        if use_async:
+            snapshot = getattr(
+                self.model,
+                '_checkpoint_snapshot',
+                None,
+            )
+            save_snapshot = getattr(
+                self.model,
+                '_save_pretrained_snapshot',
+                None,
+            )
+            if not callable(snapshot) or not callable(save_snapshot):
+                raise TypeError(
+                    'save_async requires a model with checkpoint snapshot '
+                    'support'
+                )
+            model_snapshot = snapshot()
+            optimizer_state = self._host_snapshot(opt_state)
+            if self._checkpoint_executor is None:
+                self._checkpoint_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix='taktiny-checkpoint',
+                )
+            future = self._checkpoint_executor.submit(
+                self._write_checkpoint_directory,
+                temporary_path,
+                checkpoint_path,
+                model_snapshot=model_snapshot,
+                optimizer_state=optimizer_state,
+                dataloader_state=dataloader_state,
+                rng_state=rng_state,
+                trainer_state=trainer_state,
+            )
+            self._pending_checkpoint = (checkpoint_path, future)
+            return checkpoint_path
+
+        self._write_checkpoint_directory(
+            temporary_path,
+            checkpoint_path,
+            model_snapshot=None,
+            optimizer_state=opt_state,
+            dataloader_state=dataloader_state,
+            rng_state=rng_state,
+            trainer_state=trainer_state,
+        )
+        self._finalize_checkpoint(checkpoint_path)
         return checkpoint_path
 
     def _ensure_checkpoint(
@@ -819,6 +1368,11 @@ class Trainer:
         step_in_epoch,
     ):
         checkpoint_path = self._checkpoint_directory(step)
+        if (
+            self._pending_checkpoint is not None
+            and self._pending_checkpoint[0] == checkpoint_path
+        ):
+            self._drain_pending_checkpoint()
         if (
             checkpoint_path in self.saved_checkpoints
             and os.path.isdir(checkpoint_path)
@@ -846,9 +1400,10 @@ class Trainer:
             resume_from_checkpoint: A ``checkpoint-<step>`` directory or
                 ``"latest"`` to select the highest numbered checkpoint in
                 ``output_dir``. Resuming restores model or adapter weights,
-                optimizer state, trainer history, and the saved epoch and batch
-                position. The dataloader must reproduce the same per-epoch
-                ordering so consumed batches can be skipped deterministically.
+                optimizer state, Trainer RNG, history, and the saved epoch and
+                batch position. The dataloader must reproduce the same
+                per-epoch ordering so consumed batches can be skipped
+                deterministically.
         """
         from rich.console import Console
         from rich.progress import (
@@ -894,6 +1449,7 @@ class Trainer:
             )
             self.skipped_updates = resume_state.get('skipped_updates', 0)
             self.micro_step = resume_state.get('micro_step', 0)
+            self._restore_rng_state(resume_checkpoint)
             if self.best_model_checkpoint is not None:
                 match = re.search(
                     r'checkpoint-(\d+)$',
@@ -917,32 +1473,39 @@ class Trainer:
         )
         if (
             self.training_config.eval_strategy != 'no'
-            and self.dataset_config.validation_dataloader is None
+            and self._validation_dataloader is None
         ):
             raise ValueError(
                 'validation_dataloader is required when evaluation is enabled'
             )
-        if saving_enabled and not callable(
-            getattr(self.model, 'save_pretrained', None)
-        ):
+        supports_checkpoint = (
+            callable(getattr(self.model, 'save_pretrained', None))
+            or (
+                jax.process_count() > 1
+                and isinstance(self.model, Module)
+            )
+        )
+        if saving_enabled and not supports_checkpoint:
             raise TypeError(
                 f'{type(self.model).__name__} does not support '
                 'save_pretrained checkpoints'
             )
         if saving_enabled:
             os.makedirs(self.training_config.output_dir, exist_ok=True)
+        if (
+            saving_enabled
+            and self.training_config.save_async
+            and jax.process_count() > 1
+            and jax.process_index() == 0
+        ):
+            console.print(
+                '[dim]save_async uses coordinated synchronous writes on '
+                'multi-host jobs[/dim]'
+            )
 
         self._call_event('on_train_begin')
 
         # 1. Initialize Optimizer
-        if self.training_config.remat:
-            enable_remat = getattr(self.model, 'enable_remat', None)
-            if not callable(enable_remat):
-                raise TypeError(
-                    f'{type(self.model).__name__} does not support remat'
-                )
-            enable_remat()
-
         params = self.extract_params()
         parameter_mesh = _parameter_mesh(params)
         batch_mesh = _sharding_mesh(self.dataset_config.batch_sharding)
@@ -988,11 +1551,22 @@ class Trainer:
                 checkpointer.close()
 
         # 2. Define independently compilable gradient and optimizer phases.
-        def calculate_loss(candidate_trainable, current_frozen, batch):
+        def calculate_loss(
+            candidate_trainable,
+            current_frozen,
+            batch,
+            rng,
+        ):
             current_params = _combine_params(
                 candidate_trainable,
                 current_frozen,
             )
+            if self._loss_accepts_rng:
+                return self.loss_fn(
+                    current_params,
+                    batch,
+                    rng=rng,
+                )
             return self.loss_fn(current_params, batch)
 
         use_loss_scaling = self.training_config.loss_scale is not None
@@ -1002,11 +1576,13 @@ class Trainer:
             current_frozen,
             batch,
             current_loss_scale,
+            rng,
         ):
             loss = calculate_loss(
                 candidate_trainable,
                 current_frozen,
                 batch,
+                rng,
             )
             return loss * current_loss_scale, loss
 
@@ -1017,12 +1593,14 @@ class Trainer:
             current_frozen,
             batch,
             current_loss_scale,
+            rng,
         ):
             (_, loss), grads = loss_and_grad(
                 current_trainable,
                 current_frozen,
                 batch,
                 current_loss_scale,
+                rng,
             )
             if use_loss_scaling:
                 grads = jax.tree.map(
@@ -1088,11 +1666,18 @@ class Trainer:
 
         # Try to guess total optimizer updates if dataloader has __len__.
         total_steps = None
-        if hasattr(self.dataset_config.dataloader, '__len__'):
-            updates_per_epoch = math.ceil(
-                len(self.dataset_config.dataloader) / accumulation_steps
-            )
-            total_steps = updates_per_epoch * self.training_config.epochs
+        if hasattr(self._train_dataloader, '__len__'):
+            try:
+                dataloader_length = len(self._train_dataloader)
+            except TypeError:
+                dataloader_length = None
+            if dataloader_length is not None:
+                updates_per_epoch = math.ceil(
+                    dataloader_length / accumulation_steps
+                )
+                total_steps = (
+                    updates_per_epoch * self.training_config.epochs
+                )
         if self.training_config.max_steps is not None:
             total_steps = self.training_config.max_steps
 
@@ -1353,21 +1938,44 @@ class Trainer:
                     if epoch == start_epoch
                     else 0
                 )
-                epoch_batches = self.dataset_config.dataloader
-                if skip_batches:
+                dataloader = self._train_dataloader
+                self._set_dataloader_epoch(dataloader, epoch)
+                data_iterator = iter(dataloader)
+                self._active_data_iterator = data_iterator
+                restored_iterator = (
+                    resume_checkpoint is not None
+                    and epoch == start_epoch
+                    and self._restore_dataloader_state(
+                        data_iterator,
+                        resume_checkpoint,
+                    )
+                )
+                if restored_iterator:
+                    epoch_batches = data_iterator
+                    enumerate_start = skip_batches + 1
+                elif skip_batches:
                     epoch_batches = islice(
-                        epoch_batches,
+                        data_iterator,
                         skip_batches,
                         None,
                     )
+                    enumerate_start = skip_batches + 1
+                else:
+                    epoch_batches = data_iterator
+                    enumerate_start = 1
+                prefetch_size = (
+                    0
+                    if self._has_iterator_state(data_iterator)
+                    else self.dataset_config.prefetch_size
+                )
                 batches = _prefetch(
                     epoch_batches,
                     self._place_batch,
-                    self.dataset_config.prefetch_size,
+                    prefetch_size,
                 )
                 for step_in_epoch, batch in enumerate(
                     batches,
-                    start=skip_batches + 1,
+                    start=enumerate_start,
                 ):
                     if (
                         compiled_gradient_step is None
@@ -1382,6 +1990,7 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(frozen_params),
                                 _tree_shardings(batch),
+                                None,
                                 None,
                             ),
                             out_shardings=(
@@ -1401,6 +2010,10 @@ class Trainer:
                             jnp.asarray(
                                 self.loss_scale,
                                 dtype=jnp.float32,
+                            ),
+                            jax.random.fold_in(
+                                self.rngs(),
+                                jax.process_index(),
                             ),
                         )
                     )
@@ -1513,6 +2126,12 @@ class Trainer:
                 )
                 if saving_enabled:
                     final_checkpoint_path = self._checkpoint_directory(step)
+                    if (
+                        self._pending_checkpoint is not None
+                        and self._pending_checkpoint[0]
+                        == final_checkpoint_path
+                    ):
+                        self._drain_pending_checkpoint()
                     if final_checkpoint_path in self.saved_checkpoints:
                         self._write_trainer_state(
                             final_checkpoint_path,
@@ -1551,6 +2170,10 @@ class Trainer:
             console.print(
                 f'[dim]Saved final checkpoint to {checkpoint_path}[/dim]'
             )
+        self._drain_pending_checkpoint()
+        if self._checkpoint_executor is not None:
+            self._checkpoint_executor.shutdown(wait=True)
+            self._checkpoint_executor = None
         if self.training_config.load_best_model_at_end:
             if self.best_model_checkpoint is None:
                 raise ValueError(

@@ -18,8 +18,11 @@ import os
 import json
 import re
 import tempfile
+import copy
 import jax
 import jax.numpy as jnp
+import numpy as np
+import qwix
 from huggingface_hub import (
     HfApi,
     hf_hub_download,
@@ -34,6 +37,7 @@ class PretrainedModel(Module):
     """Base class for models that load and save pretrained checkpoints.
 
     Full models are serialized as Safetensors together with a weight index.
+    Qwix arrays retain their quantized components and reconstruction metadata.
     LoRA-transformed models instead save adapter tensors and reconstruction
     metadata. Loading first constructs an abstract parameter tree with
     ``jax.eval_shape``, then maps checkpoint names to module paths, applies any
@@ -70,6 +74,140 @@ class PretrainedModel(Module):
             )
         return config_path
 
+    @staticmethod
+    def _qtype_name(qtype):
+        if isinstance(qtype, str):
+            return qtype
+        return jnp.dtype(qtype).name
+
+    @staticmethod
+    def _safetensors_qvalue(array):
+        dtype = array.dtype
+        if jnp.issubdtype(dtype, jnp.signedinteger):
+            storage_dtype = np.int8
+        elif jnp.issubdtype(dtype, jnp.unsignedinteger):
+            storage_dtype = np.uint8
+        elif jnp.issubdtype(dtype, jnp.floating):
+            storage_dtype = np.float16
+        else:
+            raise TypeError(
+                f'Unsupported Qwix qvalue dtype for serialization: {dtype}'
+            )
+        return np.asarray(jax.device_get(array), dtype=storage_dtype)
+
+    @classmethod
+    def _encode_qwix_state(cls, state):
+        encoded = {}
+        parameters = {}
+
+        for name, value in state.items():
+            if not isinstance(value, qwix.QArray):
+                encoded[name] = value
+                continue
+
+            component_prefix = f'{name}.__qwix__'
+            qvalue_name = f'{component_prefix}.qvalue'
+            scale_name = f'{component_prefix}.scale'
+            zero_point_name = (
+                f'{component_prefix}.zero_point'
+                if value.zero_point is not None
+                else None
+            )
+            encoded[qvalue_name] = cls._safetensors_qvalue(value.qvalue)
+            encoded[scale_name] = value.scale
+            if zero_point_name is not None:
+                encoded[zero_point_name] = cls._safetensors_qvalue(
+                    value.zero_point
+                )
+            parameters[name] = {
+                'qtype': cls._qtype_name(value.qtype),
+                'qvalue_dtype': value.qvalue.dtype.name,
+                'qvalue': qvalue_name,
+                'scale': scale_name,
+                'zero_point': zero_point_name,
+            }
+
+        metadata = None
+        if parameters:
+            metadata = {
+                'format': 'taktiny-qwix',
+                'version': 1,
+                'parameters': parameters,
+            }
+        return encoded, metadata
+
+    @staticmethod
+    def _decode_qwix_state(state, metadata):
+        if metadata is None:
+            return state
+        if (
+            metadata.get('format') != 'taktiny-qwix'
+            or metadata.get('version') != 1
+        ):
+            raise ValueError('Unsupported Qwix checkpoint metadata format')
+        parameters = metadata.get('parameters')
+        if not isinstance(parameters, dict):
+            raise ValueError(
+                'Qwix checkpoint metadata has no parameter mapping'
+            )
+
+        decoded = dict(state)
+        for name, specification in parameters.items():
+            if not isinstance(specification, dict):
+                raise ValueError(
+                    f'Invalid Qwix metadata for parameter {name!r}'
+                )
+            component_names = (
+                specification.get('qvalue'),
+                specification.get('scale'),
+                specification.get('zero_point'),
+            )
+            required = component_names[:2]
+            missing = [
+                component
+                for component in required
+                if component not in decoded
+            ]
+            if missing:
+                raise ValueError(
+                    f'Qwix parameter {name!r} is missing components: '
+                    f'{", ".join(missing)}'
+                )
+
+            qvalue = decoded.pop(component_names[0])
+            scale = decoded.pop(component_names[1])
+            zero_point = None
+            if component_names[2] is not None:
+                if component_names[2] not in decoded:
+                    raise ValueError(
+                        f'Qwix parameter {name!r} is missing component '
+                        f'{component_names[2]!r}'
+                    )
+                zero_point = decoded.pop(component_names[2])
+
+            qvalue_dtype = specification.get('qvalue_dtype')
+            if not isinstance(qvalue_dtype, str):
+                raise ValueError(
+                    f'Qwix parameter {name!r} has no qvalue dtype'
+                )
+            try:
+                qvalue_dtype = jnp.dtype(qvalue_dtype)
+            except TypeError as error:
+                raise ValueError(
+                    f'Qwix parameter {name!r} has unsupported qvalue dtype '
+                    f'{qvalue_dtype!r}'
+                ) from error
+            qvalue = jnp.asarray(qvalue).astype(qvalue_dtype)
+            if zero_point is not None:
+                zero_point = jnp.asarray(zero_point).astype(qvalue_dtype)
+            decoded[name] = qwix.QArray(
+                qvalue=qvalue,
+                scale=jnp.asarray(scale),
+                zero_point=zero_point,
+                qtype=specification.get('qtype'),
+            )
+        return decoded
+
     def _lora_state_dict(self):
         from taktiny.nn.lora import LoRALinear
 
@@ -86,6 +224,108 @@ class PretrainedModel(Module):
 
         collect(self)
         return state
+
+    @staticmethod
+    def _host_state_snapshot(state):
+        def copy_leaf(value):
+            value = jax.device_get(value)
+            if isinstance(value, np.ndarray):
+                return np.array(value, copy=True)
+            return value
+
+        return jax.tree.map(copy_leaf, state)
+
+    def _checkpoint_snapshot(self):
+        """Capture stable host state for background checkpoint writing."""
+        adapter_state = self._expand_stacked_state_dict(
+            self._lora_state_dict()
+        )
+        if adapter_state:
+            peft_config = getattr(self, 'peft_config', None)
+            if peft_config is None:
+                raise ValueError(
+                    'LoRA modules were found but PEFT configuration metadata '
+                    'is missing; apply LoRA through Takt.apply_peft'
+                )
+            return {
+                'kind': 'adapter',
+                'config': copy.deepcopy(self._config_dict()),
+                'peft_config': copy.deepcopy(peft_config),
+                'state': self._host_state_snapshot(adapter_state),
+            }
+
+        state = self._expand_stacked_state_dict(self.flat_state_dict())
+        return {
+            'kind': 'model',
+            'config': copy.deepcopy(self._config_dict()),
+            'state': self._host_state_snapshot(state),
+        }
+
+    @classmethod
+    def _save_pretrained_snapshot(
+        cls,
+        snapshot,
+        path,
+        *,
+        max_shard_size='5GB',
+    ):
+        os.makedirs(path, exist_ok=True)
+        model_config_path = os.path.join(path, 'config.json')
+        with open(model_config_path, 'w') as config_file:
+            json.dump(
+                snapshot['config'],
+                config_file,
+                indent=2,
+                default=str,
+            )
+
+        if snapshot['kind'] == 'adapter':
+            config_path = os.path.join(path, 'adapter_config.json')
+            with open(config_path, 'w') as config_file:
+                json.dump(snapshot['peft_config'], config_file, indent=2)
+            adapter_paths = cls._save_safetensors(
+                snapshot['state'],
+                path,
+                'adapter_model.safetensors',
+                max_shard_size=max_shard_size,
+            )
+            return (
+                model_config_path,
+                config_path,
+                *adapter_paths,
+            )
+
+        state_dict, quantization_metadata = cls._encode_qwix_state(
+            snapshot['state']
+        )
+        quantization_path = os.path.join(
+            path,
+            'quantization_config.json',
+        )
+        if quantization_metadata is not None:
+            with open(quantization_path, 'w') as quantization_file:
+                json.dump(
+                    quantization_metadata,
+                    quantization_file,
+                    indent=2,
+                )
+        elif os.path.isfile(quantization_path):
+            os.remove(quantization_path)
+            quantization_path = None
+        else:
+            quantization_path = None
+        checkpoint_paths = cls._save_safetensors(
+            state_dict,
+            path,
+            'model.safetensors',
+            max_shard_size=max_shard_size,
+            always_write_index=True,
+        )
+        return (
+            model_config_path,
+            *((quantization_path,) if quantization_path else ()),
+            *checkpoint_paths,
+        )
 
     @staticmethod
     def _expand_stacked_state_dict(state):
@@ -217,47 +457,11 @@ class PretrainedModel(Module):
             configuration files first, followed by weight files and their
             index when present.
         """
-        os.makedirs(path, exist_ok=True)
-        model_config_path = self._save_config(path)
-
-        adapter_state = self._expand_stacked_state_dict(
-            self._lora_state_dict()
-        )
-        if adapter_state:
-            adapter_path = os.path.join(path, 'adapter_model.safetensors')
-            config_path = os.path.join(path, 'adapter_config.json')
-            peft_config = getattr(self, 'peft_config', None)
-            if peft_config is None:
-                raise ValueError(
-                    'LoRA modules were found but PEFT configuration metadata '
-                    'is missing; apply LoRA through Takt.apply_peft'
-                )
-
-            adapter_paths = self._save_safetensors(
-                adapter_state,
-                path,
-                os.path.basename(adapter_path),
-                max_shard_size=max_shard_size,
-            )
-            with open(config_path, 'w') as config_file:
-                json.dump(peft_config, config_file, indent=2)
-            return (
-                model_config_path,
-                config_path,
-                *adapter_paths,
-            )
-
-        state_dict = self._expand_stacked_state_dict(
-            self.flat_state_dict()
-        )
-        checkpoint_paths = self._save_safetensors(
-            state_dict,
+        return self._save_pretrained_snapshot(
+            self._checkpoint_snapshot(),
             path,
-            'model.safetensors',
             max_shard_size=max_shard_size,
-            always_write_index=True,
         )
-        return (model_config_path, *checkpoint_paths)
 
     def load_pretrained(self, path):
         """Load a Taktiny-native full checkpoint into this model in place.
@@ -274,10 +478,16 @@ class PretrainedModel(Module):
             This model instance.
         """
         from safetensors import safe_open
-        import numpy as np
-        import qwix
 
         path = os.fspath(path)
+        quantization_path = os.path.join(
+            path,
+            'quantization_config.json',
+        )
+        quantization_metadata = None
+        if os.path.isfile(quantization_path):
+            with open(quantization_path) as quantization_file:
+                quantization_metadata = json.load(quantization_file)
         index_path = os.path.join(
             path,
             'model.safetensors.index.json',
@@ -295,6 +505,7 @@ class PretrainedModel(Module):
             filenames = {'model.safetensors': None}
 
         parameters = self.flat_parameter_dict()
+        checkpoint_state = {}
         loaded = {}
         stacked_parameters = {}
         unexpected = []
@@ -311,66 +522,66 @@ class PretrainedModel(Module):
                 device='cpu',
             ) as checkpoint:
                 for name in checkpoint.keys():
-                    if name in loaded:
+                    if name in checkpoint_state:
                         raise ValueError(
                             f'Duplicate model tensor in checkpoint: {name}'
                         )
-                    value = checkpoint.get_tensor(name)
-                    if name in parameters:
-                        parameter = parameters[name]
-                        if value.shape != parameter.shape:
-                            raise ValueError(
-                                f'Model tensor {name!r} has shape '
-                                f'{value.shape}, expected {parameter.shape}'
-                            )
-                        loaded[name] = value
-                        continue
+                    checkpoint_state[name] = checkpoint.get_tensor(name)
 
-                    matched_stack = False
-                    parts = name.split('.')
-                    for position, part in enumerate(parts):
-                        if not part.isdigit():
-                            continue
-                        stacked_parts = list(parts)
-                        stacked_parts[position] = 'stacked'
-                        stacked_name = '.'.join(stacked_parts)
-                        if stacked_name not in parameters:
-                            continue
+        checkpoint_state = self._decode_qwix_state(
+            checkpoint_state,
+            quantization_metadata,
+        )
+        for name, value in checkpoint_state.items():
+            if name in parameters:
+                parameter = parameters[name]
+                if value.shape != parameter.shape:
+                    raise ValueError(
+                        f'Model tensor {name!r} has shape '
+                        f'{value.shape}, expected {parameter.shape}'
+                    )
+                loaded[name] = value
+                continue
 
-                        parameter = parameters[stacked_name]
-                        layer_index = int(part)
-                        if layer_index >= parameter.shape[0]:
-                            raise ValueError(
-                                f'Model layer index {layer_index} is out of '
-                                f'range for {stacked_name!r}'
-                            )
-                        expected_shape = parameter.shape[1:]
-                        if value.shape != expected_shape:
-                            raise ValueError(
-                                f'Model tensor {name!r} has shape '
-                                f'{value.shape}, expected {expected_shape}'
-                            )
-                        entry = stacked_parameters.setdefault(
-                            stacked_name,
-                            {
-                                'values': np.empty(
-                                    parameter.shape,
-                                    dtype=value.dtype,
-                                ),
-                                'indices': set(),
-                            },
-                        )
-                        if layer_index in entry['indices']:
-                            raise ValueError(
-                                f'Duplicate model layer tensor: {name}'
-                            )
-                        entry['values'][layer_index] = value
-                        entry['indices'].add(layer_index)
-                        matched_stack = True
-                        break
+            matched_stack = False
+            parts = name.split('.')
+            for position, part in enumerate(parts):
+                if not part.isdigit():
+                    continue
+                stacked_parts = list(parts)
+                stacked_parts[position] = 'stacked'
+                stacked_name = '.'.join(stacked_parts)
+                if stacked_name not in parameters:
+                    continue
 
-                    if not matched_stack:
-                        unexpected.append(name)
+                parameter = parameters[stacked_name]
+                layer_index = int(part)
+                if layer_index >= parameter.shape[0]:
+                    raise ValueError(
+                        f'Model layer index {layer_index} is out of '
+                        f'range for {stacked_name!r}'
+                    )
+                expected_shape = parameter.shape[1:]
+                if value.shape != expected_shape:
+                    raise ValueError(
+                        f'Model tensor {name!r} has shape '
+                        f'{value.shape}, expected {expected_shape}'
+                    )
+                entry = stacked_parameters.setdefault(
+                    stacked_name,
+                    {'values': {}, 'indices': set()},
+                )
+                if layer_index in entry['indices']:
+                    raise ValueError(
+                        f'Duplicate model layer tensor: {name}'
+                    )
+                entry['values'][layer_index] = value
+                entry['indices'].add(layer_index)
+                matched_stack = True
+                break
+
+            if not matched_stack:
+                unexpected.append(name)
 
         if unexpected:
             preview = ', '.join(sorted(unexpected)[:8])
@@ -388,7 +599,17 @@ class PretrainedModel(Module):
                     f'Model checkpoint is missing layers {missing} '
                     f'for {name!r}'
                 )
-            loaded[name] = entry['values']
+            ordered = [
+                entry['values'][index]
+                for index in range(parameter.shape[0])
+            ]
+            if isinstance(ordered[0], qwix.QArray):
+                loaded[name] = jax.tree.map(
+                    lambda *values: jnp.stack(values),
+                    *ordered,
+                )
+            else:
+                loaded[name] = np.stack(ordered)
 
         missing = sorted(set(parameters) - set(loaded))
         if missing:
@@ -399,11 +620,39 @@ class PretrainedModel(Module):
 
         for name, value in loaded.items():
             parameter = parameters[name]
-            if isinstance(parameter.value, qwix.QArray):
+            if (
+                isinstance(parameter.value, qwix.QArray)
+                and not isinstance(value, qwix.QArray)
+            ):
                 raise TypeError(
                     'Loading a dense native checkpoint into an existing '
                     f'quantized parameter is unsupported: {name}'
                 )
+            if isinstance(value, qwix.QArray):
+                target = parameter.value
+
+                def place(component, target_component=None):
+                    component = jnp.asarray(component)
+                    sharding = getattr(target_component, 'sharding', None)
+                    if sharding is not None:
+                        component = jax.device_put(component, sharding)
+                    return component
+
+                if isinstance(target, qwix.QArray):
+                    value = qwix.QArray(
+                        qvalue=place(value.qvalue, target.qvalue),
+                        scale=place(value.scale, target.scale),
+                        zero_point=(
+                            place(value.zero_point, target.zero_point)
+                            if value.zero_point is not None
+                            else None
+                        ),
+                        qtype=value.qtype,
+                    )
+                else:
+                    value = jax.tree.map(place, value)
+                parameter.value = value
+                continue
             array = jnp.asarray(value, dtype=parameter.dtype)
             sharding = getattr(parameter.value, 'sharding', None)
             if sharding is not None:
@@ -486,6 +735,8 @@ class PretrainedModel(Module):
                 f'{stem}-*-of-*.safetensors',
                 f'{stem}.safetensors.index.json',
             ]
+            if not is_adapter:
+                delete_patterns.append('quantization_config.json')
 
             commit = api.upload_folder(
                 repo_id=resolved_repo_id,
@@ -561,6 +812,15 @@ class PretrainedModel(Module):
         module_map = module_map or []
         if isinstance(module_map, dict):
             module_map = list(module_map.items())
+        native_qwix_directory = None
+        if local:
+            candidate = os.path.join(
+                path_or_repo_str,
+                subfolder if subfolder else '',
+                'quantization_config.json',
+            )
+            if os.path.isfile(candidate):
+                native_qwix_directory = os.path.dirname(candidate)
 
         # 1. Determine if model is sharded or single file
         is_sharded = False
@@ -577,6 +837,20 @@ class PretrainedModel(Module):
                 if target_index in files:
                     is_sharded = True
                     index_path = hf_hub_download(repo_id=path_or_repo_str, subfolder=subfolder, filename="model.safetensors.index.json")
+                target_quantization = (
+                    f'{subfolder}/quantization_config.json'
+                    if subfolder
+                    else 'quantization_config.json'
+                )
+                if target_quantization in files:
+                    quantization_path = hf_hub_download(
+                        repo_id=path_or_repo_str,
+                        subfolder=subfolder,
+                        filename='quantization_config.json',
+                    )
+                    native_qwix_directory = os.path.dirname(
+                        quantization_path
+                    )
             except Exception as e:
                 print(f"Failed to fetch repo info: {e}")
                 is_sharded = False
@@ -621,6 +895,11 @@ class PretrainedModel(Module):
                 **kwargs,
             )
         )
+        if native_qwix_directory is not None:
+            state.load_pretrained(native_qwix_directory)
+            state.base_model_name_or_path = path_or_repo_str
+            return state
+
         current_state_dict = state.flat_parameter_dict()
         new_state = {}
         not_found_some = False

@@ -23,7 +23,7 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask as mask_lib
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask as mask_lib
 
 # mypy: ignore-errors
 
