@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import jax
 import qwix
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
@@ -90,12 +92,6 @@ def _combine_params(trainable, frozen):
     )
 
 
-def _apply_update(parameter, update):
-    if getattr(update, 'dtype', None) == jax.dtypes.float0:
-        return parameter
-    return parameter + update
-
-
 def _tree_shardings(tree):
     return jax.tree.map(
         lambda value: (
@@ -120,8 +116,37 @@ def _sharding_mesh(sharding):
     return None
 
 
-def _place_unsharded(tree, mesh):
-    if mesh is None:
+def _uses_multiple_devices(tree):
+    for value in jax.tree.leaves(tree):
+        sharding = getattr(value, 'sharding', None)
+        if sharding is not None and len(sharding.device_set) > 1:
+            return True
+    return False
+
+
+def _validate_parameter_placement(params, batch_mesh):
+    parameter_mesh = _parameter_mesh(params)
+    if (
+        parameter_mesh is not None
+        and batch_mesh is not None
+        and parameter_mesh != batch_mesh
+    ):
+        raise ValueError(
+            'Model parameters and batches must use the same device mesh.'
+        )
+    if batch_mesh is None or batch_mesh.size <= 1:
+        return
+    if parameter_mesh is not None or _uses_multiple_devices(params):
+        return
+    raise ValueError(
+        'Multi-device batch sharding requires pre-sharded model parameters. '
+        'Load the model with the same mesh and parameter sharding rules; '
+        'Trainer will not replicate an unsharded model automatically.'
+    )
+
+
+def _place_optimizer_state(tree, mesh):
+    if mesh is None or mesh.size <= 1:
         return tree
 
     replicated = jax.sharding.NamedSharding(
@@ -134,9 +159,39 @@ def _place_unsharded(tree, mesh):
             return value
         if isinstance(value.sharding, jax.sharding.NamedSharding):
             return value
-        return jax.device_put(value, replicated)
+        if value.ndim == 0:
+            return jax.device_put(value, replicated)
+        raise ValueError(
+            'A non-scalar optimizer state did not inherit parameter sharding. '
+            'Provide an optimizer whose parameter-shaped state preserves '
+            'input shardings.'
+        )
 
     return jax.tree.map(place, tree)
+
+
+def _prefetch(iterable, place, size):
+    """Place a bounded number of batches ahead of consumption."""
+    iterator = iter(iterable)
+    if size == 0:
+        for value in iterator:
+            yield place(value)
+        return
+
+    queue = deque()
+    for _ in range(size):
+        try:
+            queue.append(place(next(iterator)))
+        except StopIteration:
+            break
+
+    while queue:
+        yield queue.popleft()
+        try:
+            queue.append(place(next(iterator)))
+        except StopIteration:
+            pass
+
 
 class Trainer:
     def __init__(self, model, loss_fn, training_config: TrainingConfig, dataset_config: DatasetConfig):
@@ -199,7 +254,7 @@ class Trainer:
         sharding = self.dataset_config.batch_sharding
         if sharding is None:
             if self._mesh is None:
-                return batch
+                return jax.tree.map(jax.device_put, batch)
             sharding = jax.sharding.NamedSharding(
                 self._mesh,
                 jax.sharding.PartitionSpec(),
@@ -228,45 +283,43 @@ class Trainer:
         
         # 1. Initialize Optimizer
         params = self.extract_params()
-        self._mesh = (
-            _parameter_mesh(params)
-            or _sharding_mesh(self.dataset_config.batch_sharding)
-        )
-        params = _place_unsharded(params, self._mesh)
+        parameter_mesh = _parameter_mesh(params)
+        batch_mesh = _sharding_mesh(self.dataset_config.batch_sharding)
+        _validate_parameter_placement(params, batch_mesh)
+        self._mesh = parameter_mesh or batch_mesh
         labels = _parameter_labels(params)
         trainable_params, frozen_params = _partition_params(params, labels)
+        del labels, params
+
         optimizer = self._setup_optimizer(trainable_params)
         opt_state = optimizer.init(trainable_params)
-        opt_state = _place_unsharded(
+        opt_state = _place_optimizer_state(
             opt_state,
             self._mesh,
         )
         
         # 2. Define train_step
-        def train_step(
-            current_trainable,
-            current_frozen,
-            opt_state,
-            batch,
-        ):
-            def calculate_loss(candidate_trainable):
-                current_params = _combine_params(
-                    candidate_trainable,
-                    current_frozen,
-                )
-                return self.loss_fn(current_params, batch)
+        def calculate_loss(candidate_trainable, current_frozen, batch):
+            current_params = _combine_params(
+                candidate_trainable,
+                current_frozen,
+            )
+            return self.loss_fn(current_params, batch)
 
-            loss, grads = jax.value_and_grad(
-                calculate_loss,
-                allow_int=True,
-            )(current_trainable)
+        loss_and_grad = jax.value_and_grad(calculate_loss)
+
+        def train_step(current_trainable, current_frozen, opt_state, batch):
+            loss, grads = loss_and_grad(
+                current_trainable,
+                current_frozen,
+                batch,
+            )
             updates, new_opt_state = optimizer.update(
                 grads,
                 opt_state,
                 current_trainable,
             )
-            new_trainable = jax.tree.map(
-                _apply_update,
+            new_trainable = optax.apply_updates(
                 current_trainable,
                 updates,
             )
@@ -279,6 +332,7 @@ class Trainer:
         step = 0
         should_stop = False
         start_time = time.time()
+        loss = None
         
         # Try to guess total steps if dataloader has __len__
         total_steps = None
@@ -303,12 +357,19 @@ class Trainer:
                 if should_stop:
                     break
                     
-                for batch in self.dataset_config.dataloader:
-                    batch = self._place_batch(batch)
+                batches = _prefetch(
+                    self.dataset_config.dataloader,
+                    self._place_batch,
+                    self.dataset_config.prefetch_size,
+                )
+                for batch in batches:
                     if (
                         compiled_train_step is None
                         and self.training_config.jit_compile
                     ):
+                        donate_argnums = (0, 2)
+                        if self.training_config.donate_batch:
+                            donate_argnums += (3,)
                         compiled_train_step = jax.jit(
                             train_step,
                             in_shardings=(
@@ -322,7 +383,7 @@ class Trainer:
                                 _tree_shardings(opt_state),
                                 None,
                             ),
-                            donate_argnums=(0, 2),
+                            donate_argnums=donate_argnums,
                         )
                     step_fn = compiled_train_step or train_step
                     trainable_params, opt_state, loss = step_fn(
@@ -354,9 +415,16 @@ class Trainer:
                     if self.training_config.max_steps is not None and step >= self.training_config.max_steps:
                         should_stop = True
                         break
+                batches.close()
                         
-            # Force finish the progress bar
-            progress.update(task_id, completed=total_steps if total_steps else step, loss=float(loss))
+            if loss is None:
+                raise ValueError('dataloader produced no training batches')
+
+            progress.update(
+                task_id,
+                completed=step,
+                loss=float(loss),
+            )
                 
         # 4. Inject back into the object if needed
         params = _combine_params(trainable_params, frozen_params)

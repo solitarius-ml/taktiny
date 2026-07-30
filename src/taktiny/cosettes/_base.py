@@ -17,7 +17,6 @@ from __future__ import annotations
 import os
 import json
 import jax
-from pathlib import Path
 from huggingface_hub import hf_hub_download
 from safetensors.flax import save_file
 from taktiny.nn import Module, Rngs
@@ -398,3 +397,4 @@ class PretrainedModel(Module):
         state.load_flat_state_dict(new_state)
         return state
     
+__all__ = ['PretrainedModel']

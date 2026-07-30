@@ -22,10 +22,8 @@ __description__ = (
 
 from taktiny.maestro._prelude import Maestro
 from taktiny.maestro._config import ModelConfig
-from taktiny.takt import LoraConfig, PeftConfig, Takt
-from taktiny.trainer.trainer import Trainer
-from taktiny.trainer.config import TrainingConfig, DatasetConfig
-from taktiny import nn
+from taktiny.takt import Takt
+from taktiny import nn, peft
 from taktiny import transforms as tt
 
 from taktiny.maestro.opus import *

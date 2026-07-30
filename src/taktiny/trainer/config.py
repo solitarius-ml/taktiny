@@ -29,6 +29,15 @@ class TrainingConfig:
     log_interval: int = 10
     seed: int = 42
     jit_compile: bool = False
+    donate_batch: bool = False
+
+    def __post_init__(self):
+        if self.epochs < 1:
+            raise ValueError('epochs must be a positive integer')
+        if self.max_steps is not None and self.max_steps < 1:
+            raise ValueError('max_steps must be a positive integer or None')
+        if self.log_interval < 1:
+            raise ValueError('log_interval must be a positive integer')
 
 @dataclass(frozen=True)
 class DatasetConfig:
@@ -41,6 +50,11 @@ class DatasetConfig:
     batch_sharding: Any = None   # Sharding applied to every batch leaf, or a matching sharding PyTree
     shuffle: bool = True
     seed: int = 42              # shuffle seed if `shuffle == True`
+    prefetch_size: int = 2
+
+    def __post_init__(self):
+        if self.prefetch_size < 0:
+            raise ValueError('prefetch_size must be a non-negative integer')
 
 
 __all__ = ['TrainingConfig', 'DatasetConfig']
