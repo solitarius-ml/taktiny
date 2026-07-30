@@ -145,6 +145,25 @@ def _validate_parameter_placement(params, batch_mesh):
     )
 
 
+def _place_trainable_params(tree, mesh):
+    if mesh is None or mesh.size <= 1:
+        return tree
+
+    replicated = jax.sharding.NamedSharding(
+        mesh,
+        jax.sharding.PartitionSpec(),
+    )
+
+    def place(value):
+        if not isinstance(value, jax.Array):
+            return value
+        if isinstance(value.sharding, jax.sharding.NamedSharding):
+            return value
+        return jax.device_put(value, replicated)
+
+    return jax.tree.map(place, tree)
+
+
 def _place_optimizer_state(tree, mesh):
     if mesh is None or mesh.size <= 1:
         return tree
@@ -290,6 +309,15 @@ class Trainer:
         labels = _parameter_labels(params)
         trainable_params, frozen_params = _partition_params(params, labels)
         del labels, params
+
+        trainable_params = _place_trainable_params(
+            trainable_params,
+            self._mesh,
+        )
+        if self.model_type == 'taktiny':
+            self._inject_params(
+                _combine_params(trainable_params, frozen_params)
+            )
 
         optimizer = self._setup_optimizer(trainable_params)
         opt_state = optimizer.init(trainable_params)
