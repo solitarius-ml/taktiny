@@ -212,6 +212,14 @@ def _prefetch(iterable, place, size):
             pass
 
 
+def _format_iteration_time(seconds):
+    if seconds < 1:
+        return f'{seconds * 1000:.1f} ms/it'
+    if seconds < 60:
+        return f'{seconds:.1f} s/it'
+    return f'{seconds / 60:.1f} min/it'
+
+
 class Trainer:
     def __init__(self, model, loss_fn, training_config: TrainingConfig, dataset_config: DatasetConfig):
         self.model = model
@@ -301,6 +309,14 @@ class Trainer:
         console.print(f"Epochs: [bold]{self.training_config.epochs}[/bold] | Max Steps: [bold]{self.training_config.max_steps}[/bold]")
         
         # 1. Initialize Optimizer
+        if self.training_config.remat:
+            enable_remat = getattr(self.model, 'enable_remat', None)
+            if not callable(enable_remat):
+                raise TypeError(
+                    f'{type(self.model).__name__} does not support remat'
+                )
+            enable_remat()
+
         params = self.extract_params()
         parameter_mesh = _parameter_mesh(params)
         batch_mesh = _sharding_mesh(self.dataset_config.batch_sharding)
@@ -428,14 +444,20 @@ class Trainer:
                         
                         # Calculate timing
                         elapsed = time.time() - start_time
-                        ms_per_step = (elapsed / max(1, self.training_config.log_interval)) * 1000
+                        seconds_per_step = (
+                            elapsed
+                            / max(1, self.training_config.log_interval)
+                        )
+                        iteration_time = _format_iteration_time(
+                            seconds_per_step
+                        )
                         
                         # Persistent log above the progress bar
                         log_msg = (
                             f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
                             f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
                             f"Loss: [bold magenta]{loss:<7.4f}[/bold magenta] ┃ "
-                            f"[dim]{ms_per_step:>6.1f} ms/it[/dim]"
+                            f"[dim]{iteration_time:>11}[/dim]"
                         )
                         progress.console.print(log_msg)
                         start_time = time.time()

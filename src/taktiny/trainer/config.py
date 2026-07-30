@@ -30,6 +30,7 @@ class TrainingConfig:
     seed: int = 42
     jit_compile: bool = False
     donate_batch: bool = False
+    remat: bool = False
 
     def __post_init__(self):
         if self.epochs < 1:
@@ -38,6 +39,8 @@ class TrainingConfig:
             raise ValueError('max_steps must be a positive integer or None')
         if self.log_interval < 1:
             raise ValueError('log_interval must be a positive integer')
+        if not isinstance(self.remat, bool):
+            raise TypeError('remat must be a boolean')
 
 @dataclass(frozen=True)
 class DatasetConfig:

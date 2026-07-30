@@ -495,6 +495,11 @@ class TransformerModel(nn.Module):
                 'norm must be a normalization nn.Module subclass or instance'
             )
 
+        self.remat = False
+
+    def enable_remat(self):
+        self.remat = True
+
     def __call__(
         self,
         x: jax.Array,
@@ -505,6 +510,22 @@ class TransformerModel(nn.Module):
         out_sharding=None,
     ):
         x = self.embed_tokens(x)
+
+        def call_layer(layer, hidden_states, layer_cache):
+            return layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                kv_cache=layer_cache,
+                position_idx=position_idx,
+                is_causal=is_causal,
+                out_sharding=out_sharding,
+            )
+
+        if self.remat:
+            call_layer = jax.checkpoint(
+                call_layer,
+                prevent_cse=self.use_list,
+            )
 
         if kv_cache is not None:
             if len(kv_cache) != 2:
@@ -540,13 +561,10 @@ class TransformerModel(nn.Module):
                         ),
                     )
 
-                hidden_states, updated_cache = layer(
+                hidden_states, updated_cache = call_layer(
+                    layer,
                     hidden_states,
-                    attention_mask=attention_mask,
-                    kv_cache=layer_cache,
-                    position_idx=position_idx,
-                    is_causal=is_causal,
-                    out_sharding=out_sharding,
+                    layer_cache,
                 )
                 return (hidden_states, layer_idx + 1), updated_cache
 
@@ -565,13 +583,10 @@ class TransformerModel(nn.Module):
                         value_cache[layer_idx],
                     )
 
-                x, new_cache = layer(
+                x, new_cache = call_layer(
+                    layer,
                     x,
-                    attention_mask=attention_mask,
-                    kv_cache=layer_cache,
-                    position_idx=position_idx,
-                    is_causal=is_causal,
-                    out_sharding=out_sharding,
+                    layer_cache,
                 )
 
                 if new_cache is not None:
@@ -731,6 +746,9 @@ class TransformerCausalLM(PretrainedModel):
                 ('batch', 'sequence', 'vocab'),
                 rules=sharding_rules,
             )
+
+    def enable_remat(self):
+        self.model.enable_remat()
 
     def __getattr__(self, name):
         if (
