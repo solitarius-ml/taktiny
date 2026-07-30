@@ -43,6 +43,12 @@ class TrainingConfig:
     metric_for_best_model: str = 'eval_loss'
     greater_is_better: Optional[bool] = None
     load_best_model_at_end: bool = False
+    gradient_accumulation_steps: int = 1
+    max_grad_norm: Optional[float] = None
+    skip_non_finite: bool = True
+    loss_scale: float | str | None = None
+    initial_loss_scale: float = 32768.0
+    loss_scale_growth_interval: int = 2000
 
     def __post_init__(self):
         if self.epochs < 1:
@@ -112,6 +118,51 @@ class TrainingConfig:
         ):
             raise ValueError(
                 'load_best_model_at_end requires evaluation'
+            )
+        if (
+            isinstance(self.gradient_accumulation_steps, bool)
+            or not isinstance(self.gradient_accumulation_steps, int)
+            or self.gradient_accumulation_steps < 1
+        ):
+            raise ValueError(
+                'gradient_accumulation_steps must be a positive integer'
+            )
+        if (
+            self.max_grad_norm is not None
+            and (
+                isinstance(self.max_grad_norm, bool)
+                or not isinstance(self.max_grad_norm, (int, float))
+                or self.max_grad_norm <= 0
+            )
+        ):
+            raise ValueError('max_grad_norm must be positive or None')
+        if not isinstance(self.skip_non_finite, bool):
+            raise TypeError('skip_non_finite must be a boolean')
+        if not (
+            self.loss_scale is None
+            or self.loss_scale == 'dynamic'
+            or (
+                isinstance(self.loss_scale, (int, float))
+                and not isinstance(self.loss_scale, bool)
+                and self.loss_scale > 0
+            )
+        ):
+            raise ValueError(
+                'loss_scale must be None, "dynamic", or a positive number'
+            )
+        if (
+            isinstance(self.initial_loss_scale, bool)
+            or not isinstance(self.initial_loss_scale, (int, float))
+            or self.initial_loss_scale <= 0
+        ):
+            raise ValueError('initial_loss_scale must be positive')
+        if (
+            isinstance(self.loss_scale_growth_interval, bool)
+            or not isinstance(self.loss_scale_growth_interval, int)
+            or self.loss_scale_growth_interval < 1
+        ):
+            raise ValueError(
+                'loss_scale_growth_interval must be a positive integer'
             )
         if (
             self.output_dir is None

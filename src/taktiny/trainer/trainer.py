@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections import deque
 from itertools import islice
 import json
+import math
 import os
 import re
 import shutil
@@ -240,6 +241,20 @@ class Trainer:
         self.best_model_checkpoint = None
         self._best_step = None
         self._compiled_eval_step = None
+        self.loss_scale = self._initial_loss_scale()
+        self.loss_scale_good_steps = 0
+        self.skipped_updates = 0
+        self.micro_step = 0
+        self.last_grad_norm = None
+        self.last_update_skipped = False
+
+    def _initial_loss_scale(self):
+        loss_scale = self.training_config.loss_scale
+        if loss_scale == 'dynamic':
+            return float(self.training_config.initial_loss_scale)
+        if loss_scale is None:
+            return 1.0
+        return float(loss_scale)
         
     def _diagnose_model_type(self, model) -> str:
         # Detect Taktiny models
@@ -494,6 +509,26 @@ class Trainer:
             raise ValueError(
                 'trainer_state.json log_history must be a list'
             )
+        accumulation_steps = state.get('gradient_accumulation_steps', 1)
+        if accumulation_steps != (
+            self.training_config.gradient_accumulation_steps
+        ):
+            raise ValueError(
+                'Cannot resume with a different '
+                'gradient_accumulation_steps value'
+            )
+        for key in ('loss_scale_good_steps', 'skipped_updates', 'micro_step'):
+            value = state.get(key, 0)
+            if not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f'trainer_state.json has invalid {key}: {value!r}'
+                )
+        loss_scale = state.get('loss_scale', self._initial_loss_scale())
+        if not isinstance(loss_scale, (int, float)) or loss_scale <= 0:
+            raise ValueError(
+                'trainer_state.json has invalid loss_scale: '
+                f'{loss_scale!r}'
+            )
         return state
 
     def _load_checkpoint_model(self, checkpoint_path):
@@ -573,6 +608,13 @@ class Trainer:
                     'log_history': self.log_history,
                     'best_metric': self.best_metric,
                     'best_model_checkpoint': self.best_model_checkpoint,
+                    'gradient_accumulation_steps': (
+                        self.training_config.gradient_accumulation_steps
+                    ),
+                    'loss_scale': self.loss_scale,
+                    'loss_scale_good_steps': self.loss_scale_good_steps,
+                    'skipped_updates': self.skipped_updates,
+                    'micro_step': self.micro_step,
                 },
                 trainer_state_file,
                 indent=2,
@@ -676,11 +718,23 @@ class Trainer:
                 ordering so consumed batches can be skipped deterministically.
         """
         from rich.console import Console
-        from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
-        
+        from rich.progress import (
+            BarColumn,
+            Progress,
+            TextColumn,
+            TimeElapsedColumn,
+            TimeRemainingColumn,
+        )
+
         console = Console()
-        console.print(f"[bold green]Starting training for a [cyan]{self.model_type.upper()}[/cyan] model[/bold green]")
-        console.print(f"Epochs: [bold]{self.training_config.epochs}[/bold] | Max Steps: [bold]{self.training_config.max_steps}[/bold]")
+        console.print(
+            f'[bold green]Starting training for a '
+            f'[cyan]{self.model_type.upper()}[/cyan] model[/bold green]'
+        )
+        console.print(
+            f'Epochs: [bold]{self.training_config.epochs}[/bold] | '
+            f'Max Steps: [bold]{self.training_config.max_steps}[/bold]'
+        )
 
         resume_state = None
         resume_checkpoint = None
@@ -698,6 +752,15 @@ class Trainer:
             self.best_model_checkpoint = resume_state.get(
                 'best_model_checkpoint'
             )
+            self.loss_scale = float(
+                resume_state.get('loss_scale', self._initial_loss_scale())
+            )
+            self.loss_scale_good_steps = resume_state.get(
+                'loss_scale_good_steps',
+                0,
+            )
+            self.skipped_updates = resume_state.get('skipped_updates', 0)
+            self.micro_step = resume_state.get('micro_step', 0)
             if self.best_model_checkpoint is not None:
                 match = re.search(
                     r'checkpoint-(\d+)$',
@@ -788,8 +851,8 @@ class Trainer:
                 )
             finally:
                 checkpointer.close()
-        
-        # 2. Define train_step
+
+        # 2. Define independently compilable gradient and optimizer phases.
         def calculate_loss(candidate_trainable, current_frozen, batch):
             current_params = _combine_params(
                 candidate_trainable,
@@ -797,29 +860,63 @@ class Trainer:
             )
             return self.loss_fn(current_params, batch)
 
-        loss_and_grad = jax.value_and_grad(calculate_loss)
+        use_loss_scaling = self.training_config.loss_scale is not None
 
-        def train_step(current_trainable, current_frozen, opt_state, batch):
-            loss, grads = loss_and_grad(
-                current_trainable,
+        def scaled_loss(
+            candidate_trainable,
+            current_frozen,
+            batch,
+            current_loss_scale,
+        ):
+            loss = calculate_loss(
+                candidate_trainable,
                 current_frozen,
                 batch,
             )
+            return loss * current_loss_scale, loss
+
+        loss_and_grad = jax.value_and_grad(scaled_loss, has_aux=True)
+
+        def gradient_step(
+            current_trainable,
+            current_frozen,
+            batch,
+            current_loss_scale,
+        ):
+            (_, loss), grads = loss_and_grad(
+                current_trainable,
+                current_frozen,
+                batch,
+                current_loss_scale,
+            )
+            if use_loss_scaling:
+                grads = jax.tree.map(
+                    lambda grad: (
+                        grad.astype(jnp.float32)
+                        / current_loss_scale.astype(jnp.float32)
+                    ),
+                    grads,
+                )
+            return loss, grads
+
+        def optimizer_step(current_trainable, current_opt_state, grads):
             updates, new_opt_state = optimizer.update(
                 grads,
-                opt_state,
+                current_opt_state,
                 current_trainable,
             )
             new_trainable = optax.apply_updates(
                 current_trainable,
                 updates,
             )
-            return new_trainable, new_opt_state, loss
+            return new_trainable, new_opt_state
 
-        compiled_train_step = None
+        compiled_gradient_step = None
+        compiled_optimizer_step = None
 
         # 3. Training Loop
         import time
+
         step = self.global_step
         should_stop = (
             self.training_config.max_steps is not None
@@ -828,11 +925,17 @@ class Trainer:
         start_time = time.time()
         steps_since_log = 0
         steps_run_this_call = 0
-        loss = (
-            self.log_history[-1].get('loss')
-            if self.log_history
-            else None
+        microbatches_run_this_call = 0
+        loss = next(
+            (
+                record['loss']
+                for record in reversed(self.log_history)
+                if 'loss' in record
+            ),
+            None,
         )
+        grad_norm = None
+        update_skipped = False
         start_epoch = resume_state['epoch'] if resume_state else 0
         resume_step_in_epoch = (
             resume_state['step_in_epoch']
@@ -841,14 +944,23 @@ class Trainer:
         )
         epoch = start_epoch
         step_in_epoch = resume_step_in_epoch
-        
-        # Try to guess total steps if dataloader has __len__
+        accumulation_steps = (
+            self.training_config.gradient_accumulation_steps
+        )
+        accumulated_grads = None
+        accumulated_loss = None
+        accumulated_microbatches = 0
+
+        # Try to guess total optimizer updates if dataloader has __len__.
         total_steps = None
-        if hasattr(self.dataset_config.dataloader, "__len__"):
-            total_steps = len(self.dataset_config.dataloader) * self.training_config.epochs
+        if hasattr(self.dataset_config.dataloader, '__len__'):
+            updates_per_epoch = math.ceil(
+                len(self.dataset_config.dataloader) / accumulation_steps
+            )
+            total_steps = updates_per_epoch * self.training_config.epochs
         if self.training_config.max_steps is not None:
             total_steps = self.training_config.max_steps
-            
+
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -858,19 +970,232 @@ class Trainer:
             TextColumn("• [bold magenta]Loss: {task.fields[loss]:.4f}[/bold magenta]"),
             console=console
         ) as progress:
-            
+
             task_id = progress.add_task(
                 "[cyan]Training...",
                 total=total_steps,
                 completed=step,
                 loss=float(loss) if loss is not None else 0.0,
             )
-            
+
+            def finish_accumulation(current_epoch, current_step_in_epoch):
+                nonlocal accumulated_grads
+                nonlocal accumulated_loss
+                nonlocal accumulated_microbatches
+                nonlocal compiled_optimizer_step
+                nonlocal grad_norm
+                nonlocal loss
+                nonlocal opt_state
+                nonlocal should_stop
+                nonlocal start_time
+                nonlocal step
+                nonlocal steps_run_this_call
+                nonlocal steps_since_log
+                nonlocal trainable_params
+                nonlocal update_skipped
+
+                divisor = jnp.asarray(
+                    accumulated_microbatches,
+                    dtype=jnp.float32,
+                )
+                averaged_grads = jax.tree.map(
+                    lambda value: value / divisor,
+                    accumulated_grads,
+                )
+                averaged_loss = accumulated_loss / divisor
+                norm_grads = jax.tree.map(
+                    lambda value: value.astype(jnp.float32),
+                    averaged_grads,
+                )
+                current_grad_norm = optax.tree.norm(norm_grads)
+                finite = (
+                    jnp.isfinite(averaged_loss)
+                    & jnp.isfinite(current_grad_norm)
+                )
+
+                if self.training_config.max_grad_norm is not None:
+                    clip_scale = jnp.minimum(
+                        jnp.asarray(1.0, dtype=jnp.float32),
+                        (
+                            self.training_config.max_grad_norm
+                            / (current_grad_norm + 1e-6)
+                        ),
+                    )
+                    averaged_grads = jax.tree.map(
+                        lambda value: value * clip_scale.astype(value.dtype),
+                        averaged_grads,
+                    )
+
+                loss_value, grad_norm_value, finite_value = jax.device_get(
+                    (averaged_loss, current_grad_norm, finite)
+                )
+                loss_value = float(loss_value)
+                grad_norm_value = float(grad_norm_value)
+                finite_value = bool(finite_value)
+                update_skipped = (
+                    not finite_value
+                    and self.training_config.skip_non_finite
+                )
+
+                if not update_skipped:
+                    if (
+                        compiled_optimizer_step is None
+                        and self.training_config.jit_compile
+                    ):
+                        compiled_optimizer_step = jax.jit(
+                            optimizer_step,
+                            in_shardings=(
+                                _tree_shardings(trainable_params),
+                                _tree_shardings(opt_state),
+                                _tree_shardings(averaged_grads),
+                            ),
+                            out_shardings=(
+                                _tree_shardings(trainable_params),
+                                _tree_shardings(opt_state),
+                            ),
+                            donate_argnums=(0, 1, 2),
+                        )
+                    update_fn = (
+                        compiled_optimizer_step or optimizer_step
+                    )
+                    trainable_params, opt_state = update_fn(
+                        trainable_params,
+                        opt_state,
+                        averaged_grads,
+                    )
+                else:
+                    self.skipped_updates += 1
+
+                if self.training_config.loss_scale == 'dynamic':
+                    if finite_value:
+                        self.loss_scale_good_steps += 1
+                        if (
+                            self.loss_scale_good_steps
+                            >= self.training_config.loss_scale_growth_interval
+                        ):
+                            self.loss_scale *= 2.0
+                            self.loss_scale_good_steps = 0
+                    else:
+                        self.loss_scale = max(1.0, self.loss_scale / 2.0)
+                        self.loss_scale_good_steps = 0
+
+                step += 1
+                self.global_step = step
+                self.last_grad_norm = (
+                    grad_norm_value if math.isfinite(grad_norm_value) else None
+                )
+                self.last_update_skipped = update_skipped
+                loss = loss_value if math.isfinite(loss_value) else None
+                grad_norm = self.last_grad_norm
+                steps_run_this_call += 1
+                steps_since_log += 1
+                progress.update(
+                    task_id,
+                    advance=1,
+                    loss=loss_value,
+                )
+
+                accumulated_grads = None
+                accumulated_loss = None
+                accumulated_microbatches = 0
+
+                if step % self.training_config.log_interval == 0:
+                    elapsed = time.time() - start_time
+                    seconds_per_step = elapsed / max(1, steps_since_log)
+                    iteration_time = _format_iteration_time(
+                        seconds_per_step
+                    )
+                    self.log_history.append({
+                        'step': step,
+                        'epoch': current_epoch,
+                        'loss': loss,
+                        'seconds_per_step': seconds_per_step,
+                        'grad_norm': grad_norm,
+                        'loss_scale': self.loss_scale,
+                        'skipped_update': update_skipped,
+                    })
+                    loss_text = (
+                        f'{loss:<7.4f}'
+                        if loss is not None
+                        else 'non-finite'
+                    )
+                    progress.console.print(
+                        f"[bold cyan]Epoch {current_epoch:<3}[/bold cyan] ┃ "
+                        f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
+                        f"Loss: [bold magenta]{loss_text}"
+                        f"[/bold magenta] ┃ "
+                        f"[dim]{iteration_time:>11}[/dim]"
+                    )
+                    start_time = time.time()
+                    steps_since_log = 0
+
+                should_evaluate = (
+                    self.training_config.eval_strategy == 'steps'
+                    and step % self.training_config.eval_steps == 0
+                )
+                if should_evaluate:
+                    metrics, is_best = self._record_evaluation(
+                        _combine_params(
+                            trainable_params,
+                            frozen_params,
+                        ),
+                        step=step,
+                        epoch=current_epoch,
+                    )
+                    progress.console.print(
+                        f"[bold blue]Evaluation[/bold blue] ┃ "
+                        f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
+                        f"Loss: [bold magenta]"
+                        f"{metrics['eval_loss']:.4f}[/bold magenta]"
+                    )
+                    if (
+                        is_best
+                        and self.training_config.load_best_model_at_end
+                    ):
+                        self.best_model_checkpoint = (
+                            self._checkpoint_directory(step)
+                        )
+                        self._ensure_checkpoint(
+                            step,
+                            trainable_params,
+                            frozen_params,
+                            opt_state,
+                            epoch=current_epoch,
+                            step_in_epoch=current_step_in_epoch,
+                        )
+
+                if (
+                    self.training_config.save_steps is not None
+                    and step % self.training_config.save_steps == 0
+                ):
+                    if self._best_step == step:
+                        self.best_model_checkpoint = (
+                            self._checkpoint_directory(step)
+                        )
+                    checkpoint_path = self._ensure_checkpoint(
+                        step,
+                        trainable_params,
+                        frozen_params,
+                        opt_state,
+                        epoch=current_epoch,
+                        step_in_epoch=current_step_in_epoch,
+                    )
+                    progress.console.print(
+                        f'[dim]Saved checkpoint to '
+                        f'{checkpoint_path}[/dim]'
+                    )
+
+                if (
+                    self.training_config.max_steps is not None
+                    and step >= self.training_config.max_steps
+                ):
+                    should_stop = True
+
             for epoch in range(start_epoch, self.training_config.epochs):
                 if should_stop:
                     break
 
-                epoch_steps_run = 0
+                epoch_updates_run = 0
                 skip_batches = (
                     resume_step_in_epoch
                     if epoch == start_epoch
@@ -893,139 +1218,71 @@ class Trainer:
                     start=skip_batches + 1,
                 ):
                     if (
-                        compiled_train_step is None
+                        compiled_gradient_step is None
                         and self.training_config.jit_compile
                     ):
-                        donate_argnums = (0, 2)
+                        donate_argnums = ()
                         if self.training_config.donate_batch:
-                            donate_argnums += (3,)
-                        compiled_train_step = jax.jit(
-                            train_step,
+                            donate_argnums = (2,)
+                        compiled_gradient_step = jax.jit(
+                            gradient_step,
                             in_shardings=(
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(frozen_params),
-                                _tree_shardings(opt_state),
                                 _tree_shardings(batch),
+                                None,
                             ),
                             out_shardings=(
-                                _tree_shardings(trainable_params),
-                                _tree_shardings(opt_state),
                                 None,
+                                _tree_shardings(trainable_params),
                             ),
                             donate_argnums=donate_argnums,
                         )
-                    step_fn = compiled_train_step or train_step
-                    trainable_params, opt_state, loss = step_fn(
-                        trainable_params,
-                        frozen_params,
-                        opt_state,
-                        batch,
+                    current_gradient_step = (
+                        compiled_gradient_step or gradient_step
                     )
-                    step += 1
-                    self.global_step = step
-                    steps_run_this_call += 1
-                    epoch_steps_run += 1
-                    steps_since_log += 1
-                    
-                    if step % self.training_config.log_interval == 0:
-                        loss = loss.item() if isinstance(loss, jax.Array) else loss
-                        progress.update(
-                            task_id,
-                            advance=steps_since_log,
-                            loss=float(loss),
-                        )
-                        
-                        # Calculate timing
-                        elapsed = time.time() - start_time
-                        seconds_per_step = (
-                            elapsed
-                            / max(1, steps_since_log)
-                        )
-                        iteration_time = _format_iteration_time(
-                            seconds_per_step
-                        )
-                        self.log_history.append({
-                            'step': step,
-                            'epoch': epoch,
-                            'loss': float(loss),
-                            'seconds_per_step': seconds_per_step,
-                        })
-                        
-                        # Persistent log above the progress bar
-                        log_msg = (
-                            f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
-                            f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
-                            f"Loss: [bold magenta]{loss:<7.4f}[/bold magenta] ┃ "
-                            f"[dim]{iteration_time:>11}[/dim]"
-                        )
-                        progress.console.print(log_msg)
-                        start_time = time.time()
-                        steps_since_log = 0
-
-                    should_evaluate = (
-                        self.training_config.eval_strategy == 'steps'
-                        and step % self.training_config.eval_steps == 0
-                    )
-                    if should_evaluate:
-                        metrics, is_best = self._record_evaluation(
-                            _combine_params(
-                                trainable_params,
-                                frozen_params,
-                            ),
-                            step=step,
-                            epoch=epoch,
-                        )
-                        progress.console.print(
-                            f"[bold blue]Evaluation[/bold blue] ┃ "
-                            f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
-                            f"Loss: [bold magenta]"
-                            f"{metrics['eval_loss']:.4f}[/bold magenta]"
-                        )
-                        if (
-                            is_best
-                            and self.training_config.load_best_model_at_end
-                        ):
-                            self.best_model_checkpoint = (
-                                self._checkpoint_directory(step)
-                            )
-                            self._ensure_checkpoint(
-                                step,
-                                trainable_params,
-                                frozen_params,
-                                opt_state,
-                                epoch=epoch,
-                                step_in_epoch=step_in_epoch,
-                            )
-
-                    if (
-                        self.training_config.save_steps is not None
-                        and step % self.training_config.save_steps == 0
-                    ):
-                        if self._best_step == step:
-                            self.best_model_checkpoint = (
-                                self._checkpoint_directory(step)
-                            )
-                        checkpoint_path = self._ensure_checkpoint(
-                            step,
+                    microbatch_loss, microbatch_grads = (
+                        current_gradient_step(
                             trainable_params,
                             frozen_params,
-                            opt_state,
-                            epoch=epoch,
-                            step_in_epoch=step_in_epoch,
+                            batch,
+                            jnp.asarray(
+                                self.loss_scale,
+                                dtype=jnp.float32,
+                            ),
                         )
-                        progress.console.print(
-                            f'[dim]Saved checkpoint to '
-                            f'{checkpoint_path}[/dim]'
+                    )
+                    if accumulated_grads is None:
+                        accumulated_grads = microbatch_grads
+                        accumulated_loss = microbatch_loss.astype(jnp.float32)
+                    else:
+                        accumulated_grads = jax.tree.map(
+                            lambda total, value: total + value,
+                            accumulated_grads,
+                            microbatch_grads,
                         )
-                        
-                    if self.training_config.max_steps is not None and step >= self.training_config.max_steps:
-                        should_stop = True
+                        accumulated_loss = (
+                            accumulated_loss
+                            + microbatch_loss.astype(jnp.float32)
+                        )
+                    accumulated_microbatches += 1
+                    self.micro_step += 1
+                    microbatches_run_this_call += 1
+
+                    if accumulated_microbatches == accumulation_steps:
+                        finish_accumulation(epoch, step_in_epoch)
+                        epoch_updates_run += 1
+                    if should_stop:
                         break
                 batches.close()
 
+                if accumulated_microbatches and not should_stop:
+                    finish_accumulation(epoch, step_in_epoch)
+                    epoch_updates_run += 1
+
                 if (
                     self.training_config.eval_strategy == 'epoch'
-                    and epoch_steps_run > 0
+                    and epoch_updates_run > 0
                 ):
                     metrics, is_best = self._record_evaluation(
                         _combine_params(
@@ -1057,18 +1314,15 @@ class Trainer:
                             step_in_epoch=step_in_epoch,
                         )
                 resume_step_in_epoch = 0
-                        
-            if steps_run_this_call == 0 and step == 0:
+
+            if microbatches_run_this_call == 0 and step == 0:
                 raise ValueError('dataloader produced no training batches')
 
-            if (
-                steps_run_this_call > 0
-                and (
-                    not self.log_history
-                    or self.log_history[-1]['step'] != step
-                )
-            ):
-                loss = loss.item() if isinstance(loss, jax.Array) else loss
+            has_current_training_log = any(
+                record.get('step') == step and 'loss' in record
+                for record in reversed(self.log_history)
+            )
+            if steps_run_this_call > 0 and not has_current_training_log:
                 seconds_per_step = (
                     (time.time() - start_time)
                     / max(1, steps_since_log)
@@ -1076,13 +1330,19 @@ class Trainer:
                 self.log_history.append({
                     'step': step,
                     'epoch': epoch,
-                    'loss': float(loss),
+                    'loss': loss,
                     'seconds_per_step': seconds_per_step,
+                    'grad_norm': grad_norm,
+                    'loss_scale': self.loss_scale,
+                    'skipped_update': update_skipped,
                 })
+                loss_text = (
+                    f'{loss:<7.4f}' if loss is not None else 'non-finite'
+                )
                 progress.console.print(
                     f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
                     f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
-                    f"Loss: [bold magenta]{float(loss):<7.4f}"
+                    f"Loss: [bold magenta]{loss_text}"
                     f"[/bold magenta] ┃ "
                     f"[dim]{_format_iteration_time(seconds_per_step):>11}"
                     f"[/dim]"
@@ -1100,9 +1360,9 @@ class Trainer:
             progress.update(
                 task_id,
                 completed=step,
-                loss=float(loss) if loss is not None else 0.0,
+                loss=float(loss) if loss is not None else float('nan'),
             )
-                
+
         # 4. Inject back into the object if needed
         params = _combine_params(trainable_params, frozen_params)
         self._inject_params(params)
