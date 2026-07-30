@@ -8,6 +8,7 @@ dependencies = [
     "aqtp>=0.9.0",
     "huggingface-hub>=1.22.0",
     "jax>=0.10.2",
+    "orbax-checkpoint>=0.12.1",
     "qwix>=0.1.8",
     "safetensors>=0.8.0",
     "transformers>=5.13.0",

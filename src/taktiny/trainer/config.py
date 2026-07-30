@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from os import PathLike
 from typing import Any, Optional, Iterable, Callable
 
 
@@ -31,6 +32,12 @@ class TrainingConfig:
     jit_compile: bool = False
     donate_batch: bool = False
     remat: bool = False
+    output_dir: str | PathLike | None = None
+    save_steps: Optional[int] = None
+    save_total_limit: Optional[int] = None
+    save_at_end: bool = False
+    save_optimizer_state: bool = True
+    max_shard_size: int | str = '5GB'
 
     def __post_init__(self):
         if self.epochs < 1:
@@ -41,6 +48,38 @@ class TrainingConfig:
             raise ValueError('log_interval must be a positive integer')
         if not isinstance(self.remat, bool):
             raise TypeError('remat must be a boolean')
+        if (
+            self.save_steps is not None
+            and (
+                isinstance(self.save_steps, bool)
+                or self.save_steps < 1
+            )
+        ):
+            raise ValueError('save_steps must be a positive integer or None')
+        if (
+            self.save_total_limit is not None
+            and (
+                isinstance(self.save_total_limit, bool)
+                or self.save_total_limit < 1
+            )
+        ):
+            raise ValueError(
+                'save_total_limit must be a positive integer or None'
+            )
+        if not isinstance(self.save_at_end, bool):
+            raise TypeError('save_at_end must be a boolean')
+        if not isinstance(self.save_optimizer_state, bool):
+            raise TypeError('save_optimizer_state must be a boolean')
+        if (
+            self.output_dir is None
+            and (
+                self.save_steps is not None
+                or self.save_at_end
+            )
+        ):
+            raise ValueError(
+                'output_dir is required when checkpoint saving is enabled'
+            )
 
 @dataclass(frozen=True)
 class DatasetConfig:

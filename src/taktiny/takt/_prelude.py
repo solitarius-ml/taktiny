@@ -16,7 +16,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
+import os
 from typing import Any
+
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
+from safetensors import safe_open
 
 from taktiny.nn.module import Module, iter_children
 
@@ -58,6 +64,7 @@ class Takt:
 
     _peft_methods: dict[type, Callable[[Any, Any], Any]] = {}
     _peft_mergers: dict[type, Callable[..., Any]] = {}
+    _peft_loaders: dict[str, Callable[..., Any]] = {}
 
     @classmethod
     def register_peft(cls, config_type: type):
@@ -103,6 +110,22 @@ class Takt:
         return decorator
 
     @classmethod
+    def register_peft_loader(cls, peft_type: str):
+        """Register a checkpoint loader for a serialized PEFT type."""
+        normalized_type = peft_type.upper()
+
+        def decorator(implementation):
+            registered = cls._peft_loaders.get(normalized_type)
+            if registered is not None and registered is not implementation:
+                raise ValueError(
+                    f'{normalized_type} already has a registered PEFT loader'
+                )
+            cls._peft_loaders[normalized_type] = implementation
+            return implementation
+
+        return decorator
+
+    @classmethod
     def apply_peft(cls, model, config):
         """Apply a PEFT configuration to a model in place.
 
@@ -136,6 +159,129 @@ class Takt:
                 f'{type(config).__name__}'
             )
         return implementation(model, config)
+
+    @classmethod
+    def load_peft(
+        cls,
+        model,
+        path_or_repo,
+        *,
+        local=None,
+        token=None,
+        revision=None,
+        subfolder=None,
+        rngs=None,
+    ):
+        """Load a saved PEFT adapter into an existing base model.
+
+        Local directories are detected automatically. Hub repositories support
+        revisions, private-repository tokens, subfolders, and sharded adapter
+        Safetensors indexes.
+
+        Args:
+            model: Existing base model or a model with matching PEFT wrappers.
+            path_or_repo: Local adapter directory or Hub repository ID.
+            local: Override automatic local-directory detection.
+            token: Hugging Face authentication token or token-selection flag.
+            revision: Optional Hub branch, tag, or commit.
+            subfolder: Optional adapter subdirectory.
+            rngs: Optional RNG collection used when adapter wrappers must be
+                created before loading their saved values.
+
+        Returns:
+            The same model instance with loaded adapter parameters.
+        """
+        if not isinstance(model, Module):
+            raise TypeError(
+                'PEFT loading currently requires a Taktiny nn.Module model'
+            )
+
+        source = os.fspath(path_or_repo)
+        if local is None:
+            local = os.path.isdir(source)
+
+        def local_path(filename):
+            parts = [source]
+            if subfolder:
+                parts.append(os.fspath(subfolder))
+            parts.append(filename)
+            return os.path.join(*parts)
+
+        def resolve(filename):
+            if local:
+                resolved = local_path(filename)
+                if not os.path.isfile(resolved):
+                    raise FileNotFoundError(
+                        f'Adapter file was not found: {resolved}'
+                    )
+                return resolved
+            return hf_hub_download(
+                repo_id=source,
+                filename=filename,
+                subfolder=subfolder,
+                revision=revision,
+                token=token,
+            )
+
+        config_path = resolve('adapter_config.json')
+        with open(config_path) as config_file:
+            adapter_config = json.load(config_file)
+
+        peft_type = str(adapter_config.get('peft_type', '')).upper()
+        implementation = cls._peft_loaders.get(peft_type)
+        if implementation is None:
+            raise NotImplementedError(
+                f'Unsupported saved PEFT type: {peft_type or "<missing>"}'
+            )
+
+        index_filename = 'adapter_model.safetensors.index.json'
+        index_path = None
+        if local:
+            candidate = local_path(index_filename)
+            if os.path.isfile(candidate):
+                index_path = candidate
+        else:
+            try:
+                index_path = resolve(index_filename)
+            except EntryNotFoundError:
+                pass
+
+        if index_path is None:
+            adapter_files = [resolve('adapter_model.safetensors')]
+        else:
+            with open(index_path) as index_file:
+                index = json.load(index_file)
+            weight_map = index.get('weight_map')
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(
+                    'Adapter Safetensors index has no weight_map'
+                )
+            filenames = dict.fromkeys(weight_map.values())
+            adapter_files = [
+                resolve(filename)
+                for filename in filenames
+            ]
+
+        adapter_state = {}
+        for adapter_file in adapter_files:
+            with safe_open(
+                adapter_file,
+                framework='np',
+                device='cpu',
+            ) as checkpoint:
+                for name in checkpoint.keys():
+                    if name in adapter_state:
+                        raise ValueError(
+                            f'Duplicate adapter tensor in checkpoint: {name}'
+                        )
+                    adapter_state[name] = checkpoint.get_tensor(name)
+
+        return implementation(
+            model,
+            adapter_config,
+            adapter_state,
+            rngs=rngs,
+        )
 
     @classmethod
     def merge_peft(cls, model, *, dtype=None, quant=None):

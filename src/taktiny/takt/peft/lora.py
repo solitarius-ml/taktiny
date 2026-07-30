@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import re
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 import qwix
 
 from taktiny.nn.lora import LoRALinear
@@ -29,6 +31,29 @@ from taktiny.utils.quantization import (
     quantize_linear_weight,
     resolve_quantization_rule,
 )
+
+
+def _lora_modules(model):
+    modules = {}
+
+    def collect(module, prefix=''):
+        for name, child in iter_children(module):
+            full_name = f'{prefix}.{name}' if prefix else name
+            if isinstance(child, LoRALinear):
+                modules[full_name] = child
+            elif isinstance(child, Module):
+                collect(child, full_name)
+
+    collect(model)
+    return modules
+
+
+def _lora_parameters(model):
+    parameters = {}
+    for name, module in _lora_modules(model).items():
+        parameters[f'{name}.lora_A'] = module.lora_A
+        parameters[f'{name}.lora_B'] = module.lora_B
+    return parameters
 
 
 @Takt.register_peft(LoraConfig)
@@ -103,6 +128,141 @@ def _apply_lora(model: Module, config: LoraConfig):
     model.peft_config = peft_config
     model._peft_trainable_state = trainable_state
 
+    return model
+
+
+@Takt.register_peft_loader('LORA')
+def _load_lora(model, config, state, *, rngs):
+    rank = config.get('rank')
+    alpha = config.get('alpha')
+    target_modules = config.get('target_modules')
+    if rank is None or alpha is None or target_modules is None:
+        raise ValueError(
+            'LoRA adapter_config.json must contain rank, alpha, and '
+            'target_modules'
+        )
+
+    lora_config = LoraConfig(
+        target_modules=target_modules,
+        rank=rank,
+        alpha=alpha,
+        rngs=rngs,
+    )
+    existing_modules = _lora_modules(model)
+    if not existing_modules:
+        model = Takt.apply_peft(
+            model,
+            lora_config,
+        )
+    else:
+        for name, module in existing_modules.items():
+            module_alpha = module.scaling * module.rank
+            if (
+                module.rank != lora_config.rank
+                or not np.isclose(module_alpha, lora_config.alpha)
+            ):
+                raise ValueError(
+                    f'Existing LoRA module {name!r} uses rank '
+                    f'{module.rank} and alpha {module_alpha}, but the '
+                    f'adapter requires rank {lora_config.rank} and alpha '
+                    f'{lora_config.alpha}'
+                )
+    parameters = _lora_parameters(model)
+
+    loaded = {}
+    stacked_layers = {}
+    unexpected = []
+
+    for name, value in state.items():
+        if name in parameters:
+            parameter = parameters[name]
+            if value.shape != parameter.shape:
+                raise ValueError(
+                    f'Adapter tensor {name!r} has shape {value.shape}, '
+                    f'expected {parameter.shape}'
+                )
+            loaded[name] = value
+            continue
+
+        matched_stack = False
+        parts = name.split('.')
+        for position, part in enumerate(parts):
+            if not part.isdigit():
+                continue
+            stacked_parts = list(parts)
+            stacked_parts[position] = 'stacked'
+            stacked_name = '.'.join(stacked_parts)
+            if stacked_name not in parameters:
+                continue
+
+            parameter = parameters[stacked_name]
+            layer_index = int(part)
+            if layer_index >= parameter.shape[0]:
+                raise ValueError(
+                    f'Adapter layer index {layer_index} is out of range for '
+                    f'{stacked_name!r}'
+                )
+            expected_shape = parameter.shape[1:]
+            if value.shape != expected_shape:
+                raise ValueError(
+                    f'Adapter tensor {name!r} has shape {value.shape}, '
+                    f'expected {expected_shape}'
+                )
+            entry = stacked_layers.setdefault(
+                stacked_name,
+                {
+                    'values': np.empty(
+                        parameter.shape,
+                        dtype=value.dtype,
+                    ),
+                    'indices': set(),
+                },
+            )
+            if layer_index in entry['indices']:
+                raise ValueError(
+                    f'Duplicate adapter layer tensor: {name}'
+                )
+            entry['values'][layer_index] = value
+            entry['indices'].add(layer_index)
+            matched_stack = True
+            break
+
+        if not matched_stack:
+            unexpected.append(name)
+
+    if unexpected:
+        preview = ', '.join(sorted(unexpected)[:8])
+        raise ValueError(
+            f'Adapter checkpoint contains unexpected tensors: {preview}'
+        )
+
+    for name, entry in stacked_layers.items():
+        parameter = parameters[name]
+        expected_indices = set(range(parameter.shape[0]))
+        missing_indices = expected_indices - entry['indices']
+        if missing_indices:
+            missing = ', '.join(map(str, sorted(missing_indices)))
+            raise ValueError(
+                f'Adapter checkpoint is missing layers {missing} for {name!r}'
+            )
+        loaded[name] = entry['values']
+
+    missing = sorted(set(parameters) - set(loaded))
+    if missing:
+        preview = ', '.join(missing[:8])
+        raise ValueError(
+            f'Adapter checkpoint is missing tensors: {preview}'
+        )
+
+    for name, value in loaded.items():
+        parameter = parameters[name]
+        array = jnp.asarray(value, dtype=parameter.dtype)
+        sharding = getattr(parameter.value, 'sharding', None)
+        if sharding is not None:
+            array = jax.device_put(array, sharding)
+        parameter.value = array
+
+    model.peft_config = dict(config)
     return model
 
 

@@ -15,6 +15,10 @@
 from __future__ import annotations
 
 from collections import deque
+import json
+import os
+import re
+import shutil
 
 import jax
 import qwix
@@ -228,6 +232,11 @@ class Trainer:
         self.dataset_config = dataset_config
         self.model_type = self._diagnose_model_type(model)
         self._mesh = None
+        self.global_step = 0
+        self.saved_checkpoints = []
+        self.log_history = []
+        self.best_metric = None
+        self.best_model_checkpoint = None
         
     def _diagnose_model_type(self, model) -> str:
         # Detect Taktiny models
@@ -299,6 +308,119 @@ class Trainer:
             batch,
             sharding,
         )
+
+    def _checkpoint_directory(self, step):
+        return os.path.join(
+            os.fspath(self.training_config.output_dir),
+            f'checkpoint-{step}',
+        )
+
+    def _rotate_checkpoints(self):
+        limit = self.training_config.save_total_limit
+        if limit is None:
+            return
+
+        output_dir = os.fspath(self.training_config.output_dir)
+        checkpoint_pattern = re.compile(r'checkpoint-(\d+)')
+        checkpoints = []
+        for entry in os.scandir(output_dir):
+            match = checkpoint_pattern.fullmatch(entry.name)
+            if entry.is_dir() and match is not None:
+                checkpoints.append((int(match.group(1)), entry.path))
+        checkpoints.sort()
+
+        for _, checkpoint_path in checkpoints[:-limit]:
+            shutil.rmtree(checkpoint_path)
+        retained = {
+            checkpoint_path
+            for _, checkpoint_path in checkpoints[-limit:]
+        }
+        self.saved_checkpoints = [
+            path
+            for path in self.saved_checkpoints
+            if path in retained
+        ]
+
+    def _write_trainer_state(
+        self,
+        checkpoint_path,
+        *,
+        step,
+        epoch,
+        step_in_epoch,
+    ):
+        trainer_state_path = os.path.join(
+            checkpoint_path,
+            'trainer_state.json',
+        )
+        with open(trainer_state_path, 'w') as trainer_state_file:
+            json.dump(
+                {
+                    'global_step': step,
+                    'epoch': epoch,
+                    'step_in_epoch': step_in_epoch,
+                    'log_history': self.log_history,
+                    'best_metric': self.best_metric,
+                    'best_model_checkpoint': self.best_model_checkpoint,
+                },
+                trainer_state_file,
+                indent=2,
+            )
+
+    def _save_checkpoint(
+        self,
+        step,
+        trainable_params,
+        frozen_params,
+        opt_state,
+        *,
+        epoch,
+        step_in_epoch,
+    ):
+        save_pretrained = getattr(self.model, 'save_pretrained', None)
+        if not callable(save_pretrained):
+            raise TypeError(
+                f'{type(self.model).__name__} does not support '
+                'save_pretrained checkpoints'
+            )
+
+        self._inject_params(
+            _combine_params(trainable_params, frozen_params)
+        )
+        checkpoint_path = self._checkpoint_directory(step)
+        save_pretrained(
+            checkpoint_path,
+            max_shard_size=self.training_config.max_shard_size,
+        )
+
+        if self.training_config.save_optimizer_state:
+            import orbax.checkpoint as ocp
+
+            optimizer_path = os.path.join(
+                checkpoint_path,
+                'optimizer_state',
+            )
+            checkpointer = ocp.StandardCheckpointer()
+            try:
+                checkpointer.save(
+                    optimizer_path,
+                    opt_state,
+                    force=True,
+                )
+                checkpointer.wait_until_finished()
+            finally:
+                checkpointer.close()
+
+        self._write_trainer_state(
+            checkpoint_path,
+            step=step,
+            epoch=epoch,
+            step_in_epoch=step_in_epoch,
+        )
+
+        self.saved_checkpoints.append(checkpoint_path)
+        self._rotate_checkpoints()
+        return checkpoint_path
             
     def train(self):
         from rich.console import Console
@@ -307,6 +429,20 @@ class Trainer:
         console = Console()
         console.print(f"[bold green]Starting training for a [cyan]{self.model_type.upper()}[/cyan] model[/bold green]")
         console.print(f"Epochs: [bold]{self.training_config.epochs}[/bold] | Max Steps: [bold]{self.training_config.max_steps}[/bold]")
+
+        saving_enabled = (
+            self.training_config.save_steps is not None
+            or self.training_config.save_at_end
+        )
+        if saving_enabled and not callable(
+            getattr(self.model, 'save_pretrained', None)
+        ):
+            raise TypeError(
+                f'{type(self.model).__name__} does not support '
+                'save_pretrained checkpoints'
+            )
+        if saving_enabled:
+            os.makedirs(self.training_config.output_dir, exist_ok=True)
         
         # 1. Initialize Optimizer
         if self.training_config.remat:
@@ -376,6 +512,7 @@ class Trainer:
         step = 0
         should_stop = False
         start_time = time.time()
+        steps_since_log = 0
         loss = None
         
         # Try to guess total steps if dataloader has __len__
@@ -406,7 +543,7 @@ class Trainer:
                     self._place_batch,
                     self.dataset_config.prefetch_size,
                 )
-                for batch in batches:
+                for step_in_epoch, batch in enumerate(batches, start=1):
                     if (
                         compiled_train_step is None
                         and self.training_config.jit_compile
@@ -437,6 +574,8 @@ class Trainer:
                         batch,
                     )
                     step += 1
+                    self.global_step = step
+                    steps_since_log += 1
                     
                     if step % self.training_config.log_interval == 0:
                         loss = loss.item() if isinstance(loss, jax.Array) else loss
@@ -446,11 +585,17 @@ class Trainer:
                         elapsed = time.time() - start_time
                         seconds_per_step = (
                             elapsed
-                            / max(1, self.training_config.log_interval)
+                            / max(1, steps_since_log)
                         )
                         iteration_time = _format_iteration_time(
                             seconds_per_step
                         )
+                        self.log_history.append({
+                            'step': step,
+                            'epoch': epoch,
+                            'loss': float(loss),
+                            'seconds_per_step': seconds_per_step,
+                        })
                         
                         # Persistent log above the progress bar
                         log_msg = (
@@ -461,6 +606,24 @@ class Trainer:
                         )
                         progress.console.print(log_msg)
                         start_time = time.time()
+                        steps_since_log = 0
+
+                    if (
+                        self.training_config.save_steps is not None
+                        and step % self.training_config.save_steps == 0
+                    ):
+                        checkpoint_path = self._save_checkpoint(
+                            step,
+                            trainable_params,
+                            frozen_params,
+                            opt_state,
+                            epoch=epoch,
+                            step_in_epoch=step_in_epoch,
+                        )
+                        progress.console.print(
+                            f'[dim]Saved checkpoint to '
+                            f'{checkpoint_path}[/dim]'
+                        )
                         
                     if self.training_config.max_steps is not None and step >= self.training_config.max_steps:
                         should_stop = True
@@ -469,6 +632,39 @@ class Trainer:
                         
             if loss is None:
                 raise ValueError('dataloader produced no training batches')
+
+            if (
+                not self.log_history
+                or self.log_history[-1]['step'] != step
+            ):
+                loss = loss.item() if isinstance(loss, jax.Array) else loss
+                seconds_per_step = (
+                    (time.time() - start_time)
+                    / max(1, steps_since_log)
+                )
+                self.log_history.append({
+                    'step': step,
+                    'epoch': epoch,
+                    'loss': float(loss),
+                    'seconds_per_step': seconds_per_step,
+                })
+                progress.console.print(
+                    f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
+                    f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
+                    f"Loss: [bold magenta]{float(loss):<7.4f}"
+                    f"[/bold magenta] ┃ "
+                    f"[dim]{_format_iteration_time(seconds_per_step):>11}"
+                    f"[/dim]"
+                )
+                if saving_enabled:
+                    final_checkpoint_path = self._checkpoint_directory(step)
+                    if final_checkpoint_path in self.saved_checkpoints:
+                        self._write_trainer_state(
+                            final_checkpoint_path,
+                            step=step,
+                            epoch=epoch,
+                            step_in_epoch=step_in_epoch,
+                        )
 
             progress.update(
                 task_id,
@@ -479,6 +675,24 @@ class Trainer:
         # 4. Inject back into the object if needed
         params = _combine_params(trainable_params, frozen_params)
         self._inject_params(params)
+        if (
+            self.training_config.save_at_end
+            and (
+                self.training_config.save_steps is None
+                or step % self.training_config.save_steps != 0
+            )
+        ):
+            checkpoint_path = self._save_checkpoint(
+                step,
+                trainable_params,
+                frozen_params,
+                opt_state,
+                epoch=epoch,
+                step_in_epoch=step_in_epoch,
+            )
+            console.print(
+                f'[dim]Saved final checkpoint to {checkpoint_path}[/dim]'
+            )
         console.print("[bold green]✨ Training complete![/bold green]")
         
     def _inject_params(self, params):
