@@ -21,9 +21,9 @@ import functools
 from typing import List, Literal, Tuple
 import jax
 import jax.numpy as jnp
-from taktiny.kernel.megablox import backend
-from taktiny.kernel.megablox import gmm_kernel as gmm_v2
-from taktiny.kernel.megablox import tgmm_kernel as tgmm_v2
+from taktiny.kernels.megablox import backend
+from taktiny.kernels.megablox import gmm_kernel as gmm_v2
+from taktiny.kernels.megablox import tgmm_kernel as tgmm_v2
 from taktiny.utils import quantization as quantizations
 import qwix
 import qwix.pallas as qpl

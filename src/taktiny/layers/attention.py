@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import math
 from typing import Optional
 
 from taktiny import nn
@@ -57,6 +58,11 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if self.num_heads % self.num_kv_heads != 0:
+            raise ValueError(
+                'num_heads must be divisible by num_kv_heads, got '
+                f'{self.num_heads} and {self.num_kv_heads}'
+            )
         self.context_dim = hidden_size if context_dim is None else context_dim
         self.use_qkv_norm = use_qkv_norm
         self.window_size = window_size
@@ -68,12 +74,15 @@ class Attention(nn.Module):
         self.num_kv_groups = self.num_heads // self.num_kv_heads
         
         self.pos_emb = pos_emb
-        if bias and any(q_bias, k_bias, v_bias, o_bias):
+        if bias and any(
+            value is not None
+            for value in (q_bias, k_bias, v_bias, o_bias)
+        ):
             bias = False
-            q_bias = q_bias == True
-            k_bias = k_bias == True
-            v_bias = v_bias == True
-            o_bias = o_bias == True
+            q_bias = q_bias is True
+            k_bias = k_bias is True
+            v_bias = v_bias is True
+            o_bias = o_bias is True
         
         # Projections (Leveraging General Linear!)
         self.q_proj = nn.Linear(
@@ -112,6 +121,94 @@ class Attention(nn.Module):
         position_idx: jax.Array = None,
     ) -> jax.Array:
         return query
+
+    @staticmethod
+    def _validate_qkv(
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+    ) -> tuple[int, int, int, int, int, int]:
+        if query.ndim != 4 or key.ndim != 4 or value.ndim != 4:
+            raise ValueError(
+                'Attention kernels expect query, key, and value in '
+                '[batch, sequence, heads, head_dim] layout'
+            )
+
+        batch_size, query_length, query_heads, head_dim = query.shape
+        key_batch, key_length, key_heads, key_head_dim = key.shape
+        if value.shape[:3] != (key_batch, key_length, key_heads):
+            raise ValueError(
+                'key and value must have matching batch, sequence, and head '
+                f'dimensions, got {key.shape} and {value.shape}'
+            )
+        if batch_size != key_batch or head_dim != key_head_dim:
+            raise ValueError(
+                'query and key must have matching batch and head dimensions, '
+                f'got {query.shape} and {key.shape}'
+            )
+        if query_heads % key_heads != 0:
+            raise ValueError(
+                'query heads must be divisible by key/value heads, got '
+                f'{query_heads} and {key_heads}'
+            )
+        return (
+            batch_size,
+            query_length,
+            key_length,
+            query_heads,
+            key_heads,
+            head_dim,
+        )
+
+    @staticmethod
+    def _merge_causal_mask(
+        mask: jax.Array | None,
+        query_length: int,
+        key_length: int,
+    ) -> jax.Array:
+        causal_mask = (
+            jnp.arange(key_length)[None, :]
+            <= jnp.arange(query_length)[:, None]
+        )
+        if mask is None:
+            return causal_mask
+        return jnp.asarray(mask, dtype=jnp.bool_) & causal_mask
+
+    @staticmethod
+    def _broadcast_attention_mask(
+        mask: jax.Array | None,
+        *,
+        batch_size: int,
+        num_heads: int,
+        query_length: int,
+        key_length: int,
+    ) -> jax.Array:
+        if mask is None:
+            mask = jnp.ones(
+                (query_length, key_length),
+                dtype=jnp.bool_,
+            )
+        mask = jnp.asarray(mask, dtype=jnp.bool_)
+        if mask.ndim == 2:
+            mask = mask[None, None, :, :]
+        elif mask.ndim == 3:
+            mask = mask[:, None, :, :]
+        elif mask.ndim != 4:
+            raise ValueError(
+                'attention mask must have 2, 3, or 4 dimensions, got '
+                f'{mask.ndim}'
+            )
+        try:
+            return jnp.broadcast_to(
+                mask,
+                (batch_size, num_heads, query_length, key_length),
+            )
+        except ValueError as error:
+            raise ValueError(
+                'attention mask is not broadcastable to '
+                f'[{batch_size}, {num_heads}, {query_length}, {key_length}], '
+                f'got {mask.shape}'
+            ) from error
         
     @classmethod
     def apply_flash_attention(
@@ -129,26 +226,38 @@ class Attention(nn.Module):
         **kwargs,
     ) -> jax.Array:
         """Apply FlashAttention block masked kernel on Q, K, V."""
-        from taktiny.kernel.attention.flash_attention import flash_attention_block_masked
-        import math
-        head_dim = query.shape[-1]
+        from taktiny.kernels.attention.flash_attention import flash_attention_block_masked
+        (
+            batch_size,
+            query_length,
+            key_length,
+            query_heads,
+            _,
+            head_dim,
+        ) = cls._validate_qkv(query, key, value)
         if scale is None:
             scale = 1.0 / math.sqrt(head_dim)
 
-        is_4d = query.ndim == 4
-        if is_4d:
-            # (Batch, SeqLen, Heads, HeadDim) -> (Batch, Heads, SeqLen, HeadDim)
-            B, L, H, D = query.shape
-            kv_L = key.shape[1]
-            q_in = query.transpose(0, 2, 1, 3) * scale
-            k_in = key.transpose(0, 2, 1, 3)
-            v_in = value.transpose(0, 2, 1, 3)
-            bq = min(block_q, L)
-            bk = min(block_kv, kv_L)
-        else:
-            q_in, k_in, v_in = query * scale, key, value
-            bq = min(block_q, query.shape[-2])
-            bk = min(block_kv, key.shape[-2])
+        if mask is not None:
+            mask = jnp.asarray(mask, dtype=jnp.bool_)
+            if mask.ndim == 4:
+                if mask.shape[-3] != 1:
+                    raise ValueError(
+                        'Flash attention supports only masks shared across '
+                        f'heads, got {mask.shape}'
+                    )
+                mask = mask[..., 0, :, :]
+            if mask.ndim not in (2, 3):
+                raise ValueError(
+                    'Flash attention mask must have shape [query, key], '
+                    '[batch, query, key], or [batch, 1, query, key]'
+                )
+
+        q_in = query.transpose(0, 2, 1, 3) * scale
+        k_in = key.transpose(0, 2, 1, 3)
+        v_in = value.transpose(0, 2, 1, 3)
+        bq = math.gcd(query_length, min(block_q, query_length))
+        bk = math.gcd(key_length, min(block_kv, key_length))
 
         out = flash_attention_block_masked(
             q_in, k_in, v_in,
@@ -161,9 +270,12 @@ class Attention(nn.Module):
         )
         if isinstance(out, tuple):
             out = out[0]
-        if is_4d:
-            out = out.reshape(B, H, L, D).transpose(0, 2, 1, 3)
-        return out
+        return out.reshape(
+            batch_size,
+            query_heads,
+            query_length,
+            value.shape[-1],
+        ).transpose(0, 2, 1, 3)
 
     @classmethod
     def apply_ragged_attention(
@@ -172,25 +284,62 @@ class Attention(nn.Module):
         key: jax.Array,
         value: jax.Array,
         lengths: jax.Array = None,
+        scale: float = None,
+        block_size: int = 256,
+        interpret: bool | None = None,
         **kwargs,
     ) -> jax.Array:
-        """Apply Ragged Attention kernel on sequence batches."""
-        from taktiny.kernel.attention.ragged_attention import reference_mha, reference_gqa
+        """Apply the decode-only Ragged Attention kernel."""
+        from taktiny.kernels.attention.ragged_attention import (
+            ragged_gqa,
+            ragged_mha,
+        )
+        (
+            batch_size,
+            query_length,
+            key_length,
+            query_heads,
+            key_heads,
+            head_dim,
+        ) = cls._validate_qkv(query, key, value)
+        if query_length != 1:
+            raise ValueError(
+                'Ragged attention is a decode kernel and requires query '
+                f'length 1, got {query_length}'
+            )
         if lengths is None:
-            B = query.shape[0]
-            seq_len = key.shape[1] if key.ndim == 4 else key.shape[2]
-            lengths = jnp.full((B,), seq_len, dtype=jnp.int32)
-
-        num_heads_q = query.shape[-2] if query.ndim == 4 else query.shape[1]
-        num_heads_k = key.shape[-2] if key.ndim == 4 else key.shape[1]
-        if num_heads_q == num_heads_k:
-            out = reference_mha(query, key, value, lengths, **kwargs)
+            lengths = jnp.full(
+                (batch_size,),
+                key_length,
+                dtype=jnp.int32,
+            )
         else:
-            out = reference_gqa(query, key, value, lengths, **kwargs)
+            lengths = jnp.asarray(lengths)
+        if lengths.shape != (batch_size,) or lengths.dtype != jnp.int32:
+            raise ValueError(
+                'lengths must have shape [batch] and dtype int32, got '
+                f'{lengths.shape} and {lengths.dtype}'
+            )
+        if scale is None:
+            scale = 1.0 / math.sqrt(head_dim)
+        if interpret is None:
+            interpret = jax.default_backend() != 'tpu'
+        block_size = math.gcd(
+            key_length,
+            min(block_size, key_length),
+        )
 
-        if isinstance(out, tuple):
-            out = out[0]
-        return out
+        ragged = ragged_mha if query_heads == key_heads else ragged_gqa
+        out, _, denominator = ragged(
+            query * scale,
+            key,
+            value,
+            lengths,
+            block_size=block_size,
+            interpret=interpret,
+            **kwargs,
+        )
+        return out / denominator
 
     @classmethod
     def apply_splash_attention(
@@ -203,36 +352,83 @@ class Attention(nn.Module):
         scale: float = None,
         **kwargs,
     ) -> jax.Array:
-        """Apply Splash Attention block-sparse reference kernel."""
-        from taktiny.kernel.attention.splash_attention import attention_reference
-        import math
-        head_dim = query.shape[-1]
+        """Apply the Splash Attention reference with dense masks."""
+        from taktiny.kernels.attention.splash_attention import attention_reference
+
+        (
+            batch_size,
+            query_length,
+            key_length,
+            query_heads,
+            key_heads,
+            head_dim,
+        ) = cls._validate_qkv(query, key, value)
         if scale is None:
             scale = 1.0 / math.sqrt(head_dim)
-        q_scaled = query * scale
 
-        if mask is None:
-            q_len = query.shape[1] if query.ndim >= 3 else query.shape[0]
-            k_len = key.shape[1] if key.ndim >= 3 else key.shape[0]
-            mask = jnp.ones((q_len, k_len), dtype=jnp.bool_)
-        if query.ndim == 4:
-            # vmap over batch (axis 0) and head (axis 2) dimensions for 4D (B, L, H, D)
-            vmapped_attn = jax.vmap(
-                jax.vmap(
-                    lambda q_2d, k_2d, v_2d: attention_reference(mask, q_2d, k_2d, v_2d, segment_ids, **kwargs),
-                    in_axes=(1, 1, 1), out_axes=1
-                ),
-                in_axes=(0, 0, 0), out_axes=0
+        mask = cls._broadcast_attention_mask(
+            mask,
+            batch_size=batch_size,
+            num_heads=query_heads,
+            query_length=query_length,
+            key_length=key_length,
+        )
+        if segment_ids is not None:
+            query_segments = jnp.asarray(segment_ids.q)
+            key_segments = jnp.asarray(segment_ids.kv)
+            if query_segments.ndim == 1:
+                query_segments = query_segments[None, :]
+            if key_segments.ndim == 1:
+                key_segments = key_segments[None, :]
+            try:
+                query_segments = jnp.broadcast_to(
+                    query_segments,
+                    (batch_size, query_length),
+                )
+                key_segments = jnp.broadcast_to(
+                    key_segments,
+                    (batch_size, key_length),
+                )
+            except ValueError as error:
+                raise ValueError(
+                    'segment IDs must be broadcastable to [batch, sequence]'
+                ) from error
+            mask = mask & (
+                query_segments[:, None, :, None]
+                == key_segments[:, None, None, :]
             )
-            out = vmapped_attn(q_scaled, key, value)
-            if isinstance(out, tuple):
-                out = out[0]
-            return out
-        else:
-            out = attention_reference(mask, q_scaled, key, value, segment_ids, **kwargs)
-            if isinstance(out, tuple):
-                out = out[0]
-            return out
+
+        kv_head_indices = (
+            jnp.arange(query_heads)
+            // (query_heads // key_heads)
+        )
+        query = query.transpose(0, 2, 1, 3) * scale
+        key = jnp.take(
+            key.transpose(0, 2, 1, 3),
+            kv_head_indices,
+            axis=1,
+        )
+        value = jnp.take(
+            value.transpose(0, 2, 1, 3),
+            kv_head_indices,
+            axis=1,
+        )
+
+        def apply_head(q, k, v, head_mask):
+            out = attention_reference(
+                head_mask,
+                q,
+                k,
+                v,
+                None,
+                **kwargs,
+            )
+            return out[0] if isinstance(out, tuple) else out
+
+        out = jax.vmap(
+            jax.vmap(apply_head),
+        )(query, key, value, mask)
+        return out.transpose(0, 2, 1, 3)
 
     @classmethod
     def apply_ring_attention(
@@ -240,12 +436,66 @@ class Attention(nn.Module):
         query: jax.Array,
         key: jax.Array,
         value: jax.Array,
-        axis_name: str = "seq",
+        *,
+        ring_kernel=None,
+        segment_ids=None,
+        scale: float = None,
         **kwargs,
     ) -> jax.Array:
-        """Apply Context Parallel Ring Attention kernel."""
-        from taktiny.kernel.attention.tokamax_splash import ring_attention_kernel
-        return ring_attention_kernel.ring_attention_custom(query, key, value, axis_name=axis_name, **kwargs)
+        """Apply a prebuilt Ring Splash Attention kernel."""
+        from taktiny.kernels.attention.tokamax_splash import (
+            ring_attention_kernel,
+        )
+
+        (
+            batch_size,
+            _,
+            _,
+            _,
+            _,
+            head_dim,
+        ) = cls._validate_qkv(query, key, value)
+        if ring_kernel is None:
+            raise ValueError(
+                'ring_kernel is required; construct it with '
+                'make_ring_attention before calling Attention.apply'
+            )
+        if scale is None:
+            scale = 1.0 / math.sqrt(head_dim)
+
+        query = query.transpose(0, 2, 1, 3) * scale
+        key = key.transpose(0, 2, 1, 3)
+        value = value.transpose(0, 2, 1, 3)
+
+        if segment_ids is None:
+            out = jax.vmap(
+                lambda q, k, v: ring_kernel(q, k, v, None, **kwargs)
+            )(query, key, value)
+        else:
+            query_segments = jnp.asarray(segment_ids.q)
+            key_segments = jnp.asarray(segment_ids.kv)
+            if query_segments.shape[0] != batch_size:
+                raise ValueError(
+                    'batched ring segment IDs must match the query batch'
+                )
+
+            def apply_one(q, k, v, q_segments, kv_segments):
+                segments = ring_attention_kernel.SegmentIds(
+                    q_segments,
+                    kv_segments,
+                )
+                return ring_kernel(q, k, v, segments, **kwargs)
+
+            out = jax.vmap(apply_one)(
+                query,
+                key,
+                value,
+                query_segments,
+                key_segments,
+            )
+        if isinstance(out, tuple):
+            out = out[0]
+        return out.transpose(0, 2, 1, 3)
 
     @classmethod
     def apply(
@@ -274,15 +524,72 @@ class Attention(nn.Module):
                 mask=mask,
                 scale=scale,
                 is_causal=is_causal,
+                **kwargs,
             )
         elif kernel in ("flash", "flash_attention"):
-            return cls.apply_flash_attention(query, key, value, bias=bias, scale=scale, **kwargs)
+            if bias is not None:
+                raise ValueError(
+                    'Flash attention does not support additive bias'
+                )
+            if is_causal:
+                mask = cls._merge_causal_mask(
+                    mask,
+                    query.shape[1],
+                    key.shape[1],
+                )
+            return cls.apply_flash_attention(
+                query,
+                key,
+                value,
+                mask=mask,
+                scale=scale,
+                **kwargs,
+            )
         elif kernel in ("ragged", "ragged_attention"):
-            return cls.apply_ragged_attention(query, key, value, **kwargs)
+            if mask is not None or bias is not None:
+                raise ValueError(
+                    'Ragged attention uses lengths for prefix masking and '
+                    'does not support mask or bias'
+                )
+            return cls.apply_ragged_attention(
+                query,
+                key,
+                value,
+                scale=scale,
+                **kwargs,
+            )
         elif kernel in ("splash", "splash_attention"):
-            return cls.apply_splash_attention(query, key, value, mask=mask, **kwargs)
+            if bias is not None:
+                raise ValueError(
+                    'Splash attention does not support additive bias'
+                )
+            if is_causal:
+                mask = cls._merge_causal_mask(
+                    mask,
+                    query.shape[1],
+                    key.shape[1],
+                )
+            return cls.apply_splash_attention(
+                query,
+                key,
+                value,
+                mask=mask,
+                scale=scale,
+                **kwargs,
+            )
         elif kernel in ("ring", "ring_attention"):
-            return cls.apply_ring_attention(query, key, value, **kwargs)
+            if mask is not None or bias is not None:
+                raise ValueError(
+                    'Ring attention masking is fixed when ring_kernel is '
+                    'constructed; mask and bias cannot be supplied at call time'
+                )
+            return cls.apply_ring_attention(
+                query,
+                key,
+                value,
+                scale=scale,
+                **kwargs,
+            )
         else:
             raise ValueError(
                 f"Unknown attention kernel method: '{kernel}'. Choice of ['dot_product', 'flash', 'ragged', 'splash', 'ring']"

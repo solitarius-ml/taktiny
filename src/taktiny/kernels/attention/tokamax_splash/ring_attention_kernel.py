@@ -25,11 +25,11 @@ from jax import lax
 from jax import tree_util
 import jax.numpy as jnp
 import numpy as np
-from taktiny.kernel.attention.tokamax_splash import base
-from taktiny.kernel.attention.tokamax_splash import ring_attention_utils
-from taktiny.kernel.attention.tokamax_splash import splash_attention_kernel as splash_kernel
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask as mask_lib
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
+from taktiny.kernels.attention.tokamax_splash import base
+from taktiny.kernels.attention.tokamax_splash import ring_attention_utils
+from taktiny.kernels.attention.tokamax_splash import splash_attention_kernel as splash_kernel
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask as mask_lib
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
 
 P = jax.P
 MaskInfo = mask_info_lib.MaskInfo

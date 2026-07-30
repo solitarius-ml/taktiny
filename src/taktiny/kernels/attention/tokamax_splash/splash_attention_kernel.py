@@ -32,9 +32,9 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
-from taktiny.kernel.attention.tokamax_splash import base
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask as mask_lib
-from taktiny.kernel.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
+from taktiny.kernels.attention.tokamax_splash import base
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask as mask_lib
+from taktiny.kernels.attention.tokamax_splash import splash_attention_mask_info as mask_info_lib
 
 
 P = jax.P

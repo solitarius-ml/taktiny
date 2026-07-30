@@ -17,7 +17,7 @@ from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-from taktiny.kernel.attention import splash_attention as splash_attention_kernel
+from taktiny.kernels.attention import splash_attention as splash_attention_kernel
 
 SegmentIds = splash_attention_kernel.SegmentIds
 
@@ -43,8 +43,8 @@ def flash_attention_block_masked(
   """Computes masked flash attention using block-sparse masking.
 
   Args:
-    q: Query tensor with shape (batch_size, num_kv_heads,
-      num_q_heads_per_kv_head, q_seq_len, head_dim).
+    q: Query tensor with shape (batch_size, num_q_heads, q_seq_len,
+      head_dim).
     k: Key tensor with shape (batch_size, num_kv_heads, kv_seq_len, head_dim).
     v: Value tensor with shape (batch_size, num_kv_heads, kv_seq_len,
       v_head_dim).
@@ -63,8 +63,7 @@ def flash_attention_block_masked(
       attn_logits_soft_cap
     save_residuals: Whether to save residuals. If True, returns a tuple of
       (output, dict=(logsumexp, max_logits)). Both `logsumexp` and `max_logits`
-      are of shape (batch_size, num_kv_heads, num_q_heads // num_kv_heads,
-      q_seq_len).
+      are of shape (batch_size, num_q_heads, q_seq_len).
 
   Returns:
     If save_residuals is True, returns a tuple containing:
@@ -223,17 +222,19 @@ def flash_attention_block_masked(
 
   output, l, m = jax.lax.fori_loop(0, num_kv_blocks, outer_loop_body, (output, l, m), unroll=True)
 
-  # Reshape the output to drop the size one dimension at index 2,
-  # which corresponds to `num_q_heads // num_kv_heads` when
-  # num_q_heads == num_kv_heads.
-  output = output.squeeze(axis=2)
+  output = output.reshape(
+      batch_size,
+      num_q_heads,
+      q_seq_len,
+      v_head_dim_size,
+  )
   if not save_residuals:
     # To avoid remat of the output, we can use context=hbm remat policy as in
     # maxtext/configs/types.py
     return output
 
-  l = l.squeeze(axis=2)
-  m = m.squeeze(axis=2)
+  l = l.reshape(batch_size, num_q_heads, q_seq_len)
+  m = m.reshape(batch_size, num_q_heads, q_seq_len)
   stats = {"logsumexp": m + jnp.log(l), "max_logits": m}
   stats = jax.tree.map(jax.lax.stop_gradient, stats)
   return output, stats

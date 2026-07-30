@@ -13,19 +13,19 @@
 # limitations under the License.
 """Attention kernels from MaxText (Flash, Ragged, Splash, Ring)."""
 
-from taktiny.kernel.attention.flash_attention import flash_attention_block_masked
-from taktiny.kernel.attention.ragged_attention import (
+from taktiny.kernels.attention.flash_attention import flash_attention_block_masked
+from taktiny.kernels.attention.ragged_attention import (
     ragged_flash_attention_kernel,
     ragged_mqa,
     ragged_mha,
     ragged_gqa,
 )
-from taktiny.kernel.attention.splash_attention import (
+from taktiny.kernels.attention.splash_attention import (
     make_attention_reference,
     attention_reference,
     attention_reference_custom,
 )
-from taktiny.kernel.attention.ring_attention import (
+from taktiny.kernels.attention.ring_attention import (
     is_context_parallel_ring_requested,
     build_splash_config,
 )

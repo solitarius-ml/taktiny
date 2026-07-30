@@ -18,7 +18,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from taktiny.kernel import gather_reduce_sc
+from taktiny.kernels import gather_reduce_sc
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
