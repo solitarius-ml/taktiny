@@ -113,6 +113,181 @@ class Attention(nn.Module):
     ) -> jax.Array:
         return query
         
+    @classmethod
+    def apply_flash_attention(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        segment_ids=None,
+        block_kv: int = 128,
+        block_q: int = 128,
+        mask: jax.Array = None,
+        mask_value: float = -1e9,
+        cap: float = None,
+        scale: float = None,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply FlashAttention block masked kernel on Q, K, V."""
+        from taktiny.kernel.attention.flash_attention import flash_attention_block_masked
+        import math
+        head_dim = query.shape[-1]
+        if scale is None:
+            scale = 1.0 / math.sqrt(head_dim)
+
+        is_4d = query.ndim == 4
+        if is_4d:
+            # (Batch, SeqLen, Heads, HeadDim) -> (Batch, Heads, SeqLen, HeadDim)
+            B, L, H, D = query.shape
+            kv_L = key.shape[1]
+            q_in = query.transpose(0, 2, 1, 3) * scale
+            k_in = key.transpose(0, 2, 1, 3)
+            v_in = value.transpose(0, 2, 1, 3)
+            bq = min(block_q, L)
+            bk = min(block_kv, kv_L)
+        else:
+            q_in, k_in, v_in = query * scale, key, value
+            bq = min(block_q, query.shape[-2])
+            bk = min(block_kv, key.shape[-2])
+
+        out = flash_attention_block_masked(
+            q_in, k_in, v_in,
+            segment_ids=segment_ids,
+            block_kv=bk,
+            block_q=bq,
+            mask=mask,
+            mask_value=mask_value,
+            cap=cap,
+        )
+        if isinstance(out, tuple):
+            out = out[0]
+        if is_4d:
+            out = out.reshape(B, H, L, D).transpose(0, 2, 1, 3)
+        return out
+
+    @classmethod
+    def apply_ragged_attention(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        lengths: jax.Array = None,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Ragged Attention kernel on sequence batches."""
+        from taktiny.kernel.attention.ragged_attention import reference_mha, reference_gqa
+        if lengths is None:
+            B = query.shape[0]
+            seq_len = key.shape[1] if key.ndim == 4 else key.shape[2]
+            lengths = jnp.full((B,), seq_len, dtype=jnp.int32)
+
+        num_heads_q = query.shape[-2] if query.ndim == 4 else query.shape[1]
+        num_heads_k = key.shape[-2] if key.ndim == 4 else key.shape[1]
+        if num_heads_q == num_heads_k:
+            out = reference_mha(query, key, value, lengths, **kwargs)
+        else:
+            out = reference_gqa(query, key, value, lengths, **kwargs)
+
+        if isinstance(out, tuple):
+            out = out[0]
+        return out
+
+    @classmethod
+    def apply_splash_attention(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        mask=None,
+        segment_ids=None,
+        scale: float = None,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Splash Attention block-sparse reference kernel."""
+        from taktiny.kernel.attention.splash_attention import attention_reference
+        import math
+        head_dim = query.shape[-1]
+        if scale is None:
+            scale = 1.0 / math.sqrt(head_dim)
+        q_scaled = query * scale
+
+        if mask is None:
+            q_len = query.shape[1] if query.ndim >= 3 else query.shape[0]
+            k_len = key.shape[1] if key.ndim >= 3 else key.shape[0]
+            mask = jnp.ones((q_len, k_len), dtype=jnp.bool_)
+        if query.ndim == 4:
+            # vmap over batch (axis 0) and head (axis 2) dimensions for 4D (B, L, H, D)
+            vmapped_attn = jax.vmap(
+                jax.vmap(
+                    lambda q_2d, k_2d, v_2d: attention_reference(mask, q_2d, k_2d, v_2d, segment_ids, **kwargs),
+                    in_axes=(1, 1, 1), out_axes=1
+                ),
+                in_axes=(0, 0, 0), out_axes=0
+            )
+            out = vmapped_attn(q_scaled, key, value)
+            if isinstance(out, tuple):
+                out = out[0]
+            return out
+        else:
+            out = attention_reference(mask, q_scaled, key, value, segment_ids, **kwargs)
+            if isinstance(out, tuple):
+                out = out[0]
+            return out
+
+    @classmethod
+    def apply_ring_attention(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        axis_name: str = "seq",
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Context Parallel Ring Attention kernel."""
+        from taktiny.kernel.attention.tokamax_splash import ring_attention_kernel
+        return ring_attention_kernel.ring_attention_custom(query, key, value, axis_name=axis_name, **kwargs)
+
+    @classmethod
+    def apply(
+        cls,
+        query: jax.Array,
+        key: jax.Array,
+        value: jax.Array,
+        kernel: str = "dot_product",
+        mask: jax.Array = None,
+        bias: jax.Array = None,
+        scale: float = None,
+        is_causal: bool = False,
+        **kwargs,
+    ) -> jax.Array:
+        """
+        Unified Entry Point for Attention Kernel Applications.
+        Supported kernel methods: 'dot_product', 'flash', 'ragged', 'splash', 'ring'.
+        """
+        kernel = kernel.lower()
+        if kernel in ("dot_product", "standard", "jax"):
+            return jax.nn.dot_product_attention(
+                query=query,
+                key=key,
+                value=value,
+                bias=bias,
+                mask=mask,
+                scale=scale,
+                is_causal=is_causal,
+            )
+        elif kernel in ("flash", "flash_attention"):
+            return cls.apply_flash_attention(query, key, value, bias=bias, scale=scale, **kwargs)
+        elif kernel in ("ragged", "ragged_attention"):
+            return cls.apply_ragged_attention(query, key, value, **kwargs)
+        elif kernel in ("splash", "splash_attention"):
+            return cls.apply_splash_attention(query, key, value, mask=mask, **kwargs)
+        elif kernel in ("ring", "ring_attention"):
+            return cls.apply_ring_attention(query, key, value, **kwargs)
+        else:
+            raise ValueError(
+                f"Unknown attention kernel method: '{kernel}'. Choice of ['dot_product', 'flash', 'ragged', 'splash', 'ring']"
+            )
+
     def __call__(
         self, 
         x: jax.Array, 
@@ -121,7 +296,8 @@ class Attention(nn.Module):
         is_causal: bool = False,
         kv_cache: tuple[jax.Array, jax.Array] = None,
         position_idx: jax.Array = None,
-        out_sharding = None
+        out_sharding = None,
+        kernel: str = "dot_product",
     ) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         
         context_in = context if context is not None else x
@@ -276,16 +452,16 @@ class Attention(nn.Module):
                 key_length,
             )
 
-        # JAX's dot_product_attention natively handles GQA (num_kv_heads < num_heads)!
-        # It expects shape [Batch, SeqLen, Heads, HeadDim] for query, key, and value.
-        out = jax.nn.dot_product_attention(
-            query=q, 
-            key=k, 
-            value=v, 
+        # Apply attention using requested kernel via Attention.apply entry point!
+        out = self.apply(
+            query=q,
+            key=k,
+            value=v,
+            kernel=kernel,
             bias=attention_bias,
             mask=attention_mask,
             scale=self.scaling,
-            is_causal=is_causal
+            is_causal=is_causal,
         )
         
         # Output projection from (Batch, SeqLen, Heads, HeadDim) directly to (Batch, SeqLen, HiddenSize)

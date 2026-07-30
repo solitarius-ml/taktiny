@@ -89,11 +89,166 @@ class FusedGateMLP(Module):
         
         self.linear_in = nn.Linear(hidden_size, intermediate_size * 2, bias=bias, dtype=dtype, seed=seed, axis_names=linear_in_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
         self.linear_out = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, seed=seed, axis_names=linear_out_axis_names, shard_mode=shard_mode, quant=quant, dot_general=dot_general)
-        
     def __call__(self, x: jax.Array, out_sharding=None) -> jax.Array:
-        x = self.linear_in(x)
-        x, gate = jnp.split(x, 2, axis=-1)
-        return self.linear_out(x * self.activation(gate), out_sharding=out_sharding)
-    
+        h = self.linear_in(x)
+        h, gate = jnp.split(h, 2, axis=-1)
+        return self.linear_out(h * self.activation(gate), out_sharding=out_sharding)
+
+    @classmethod
+    def apply_gmm(
+        cls,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        group_sizes: jax.Array,
+        transpose_rhs: bool = False,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Megablox Grouped Matrix Multiply (GMM) kernel."""
+        from taktiny.kernel.megablox import gmm
+        return gmm(lhs, rhs, group_sizes, transpose_rhs=transpose_rhs, **kwargs)
+
+    @classmethod
+    def apply_route(
+        cls,
+        x: jax.Array,
+        indices: jax.Array,
+        num_groups: int = None,
+        use_gather_mosaic_kernel: bool = False,
+        **kwargs,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Apply MoE activation sorting/routing kernel."""
+        from taktiny.kernel.sort_activations import route
+        indices_2d = indices[:, None] if indices.ndim == 1 else indices
+        sorted_x = route(x, indices_2d, use_gather_mosaic_kernel)
+        if num_groups is not None:
+            group_sizes = jnp.bincount(indices.reshape(-1), length=num_groups)
+        else:
+            group_sizes = jnp.bincount(indices.reshape(-1))
+        return sorted_x, group_sizes
+
+    @classmethod
+    def apply_unroute(
+        cls,
+        x: jax.Array,
+        indices: jax.Array,
+        use_gather_mosaic_kernel: bool = False,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply MoE activation un-sorting/un-routing kernel."""
+        from taktiny.kernel.sort_activations import unroute
+        indices_2d = indices[:, None] if indices.ndim == 1 else indices
+        return unroute(x, indices_2d, use_gather_mosaic_kernel)
+
+    @classmethod
+    def apply(
+        cls,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        group_sizes: jax.Array,
+        kernel: str = "gmm",
+        **kwargs,
+    ) -> jax.Array:
+        """Unified entry point for MoE GMM kernel application."""
+        if kernel == "gmm":
+            return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)
+        else:
+            raise ValueError(f"Unknown MoE kernel method: '{kernel}'")
+
+
+class MoeFFN(Module):
+    """
+    Mixture-of-Experts (MoE) FFN module utilizing Megablox Grouped Matrix Multiply (GMM) 
+    and activation sorting kernels.
+    """
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        num_experts: int,
+        bias: bool = False,
+        dtype: str = None,
+        rngs: nn.Rngs = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ):
+        self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
+        self.num_experts = num_experts
+
+    @classmethod
+    def apply_gmm(
+        cls,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        group_sizes: jax.Array,
+        transpose_rhs: bool = False,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Megablox Grouped Matrix Multiply (GMM) kernel."""
+        from taktiny.kernel.megablox import gmm
+        return gmm(lhs, rhs, group_sizes, transpose_rhs=transpose_rhs, **kwargs)
+
+    @classmethod
+    def apply_route(
+        cls,
+        x: jax.Array,
+        indices: jax.Array,
+        num_groups: int = None,
+        use_gather_mosaic_kernel: bool = False,
+        **kwargs,
+    ) -> tuple[jax.Array, jax.Array]:
+        """Apply MoE activation sorting/routing kernel."""
+        from taktiny.kernel.sort_activations import route
+        indices_2d = indices[:, None] if indices.ndim == 1 else indices
+        sorted_x = route(x, indices_2d, use_gather_mosaic_kernel)
+        if num_groups is not None:
+            group_sizes = jnp.bincount(indices.reshape(-1), length=num_groups)
+        else:
+            group_sizes = jnp.bincount(indices.reshape(-1))
+        return sorted_x, group_sizes
+
+    @classmethod
+    def apply_unroute(
+        cls,
+        x: jax.Array,
+        indices: jax.Array,
+        use_gather_mosaic_kernel: bool = False,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply MoE activation un-sorting/un-routing kernel."""
+        from taktiny.kernel.sort_activations import unroute
+        indices_2d = indices[:, None] if indices.ndim == 1 else indices
+        return unroute(x, indices_2d, use_gather_mosaic_kernel)
+
+    @classmethod
+    def apply(
+        cls,
+        lhs: jax.Array,
+        rhs: jax.Array,
+        group_sizes: jax.Array,
+        kernel: str = "gmm",
+        **kwargs,
+    ) -> jax.Array:
+        """Unified entry point for MoE GMM kernel application."""
+        if kernel == "gmm":
+            return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)
+        else:
+            raise ValueError(f"Unknown MoE kernel method: '{kernel}'")
+
+
 class MLP(Module):
-    ...
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        activation: Callable | str = jax.nn.gelu,
+        bias: bool = True,
+        dtype: str = None,
+        rngs: nn.Rngs = None,
+        shard_mode: ShardMode = ShardMode.AUTO,
+    ):
+        self.activation = activation if isinstance(activation, Callable) else getattr(jax.nn, activation)
+        self.fc1 = nn.Linear(hidden_size, intermediate_size, bias=bias, dtype=dtype, rngs=rngs, shard_mode=shard_mode)
+        self.fc2 = nn.Linear(intermediate_size, hidden_size, bias=bias, dtype=dtype, rngs=rngs, shard_mode=shard_mode)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return self.fc2(self.activation(self.fc1(x)))

@@ -23,7 +23,7 @@ __description__ = (
 from taktiny.maestro._prelude import Maestro
 from taktiny.maestro._config import ModelConfig
 from taktiny.takt import Takt
-from taktiny import nn, peft
+from taktiny import nn, peft, kernel, layers
 from taktiny import transforms as tt
 
 from taktiny.maestro.opus import *
@@ -38,5 +38,7 @@ __all__ = [
     'TrainingConfig',
     'DatasetConfig',
     'tt',
-    'nn'
+    'nn',
+    'layers',
+    'kernel',
 ]

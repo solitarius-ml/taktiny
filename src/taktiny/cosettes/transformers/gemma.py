@@ -21,6 +21,7 @@ from jax.nn.initializers import normal
 
 from taktiny import nn
 from taktiny.cosettes._common import TransformerDecoderLayer
+from taktiny.maestro._config import ModelConfig
 from taktiny.layers import Attention, GateMLP, RotaryEmbedding
 from taktiny.utils.typing import ShardMode
 
@@ -184,20 +185,38 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
             or getattr(config, 'dtype', None)
             or 'bfloat16'
         )
-        layer_type = config.layer_types[layer_idx]
-        rope_parameters = getattr(config, 'rope_parameters', None) or {}
-        layer_rope_parameters = rope_parameters.get(layer_type) or {}
+        layer_types = getattr(config, 'layer_types', None)
+        if layer_types is not None and layer_idx < len(layer_types):
+            layer_type = layer_types[layer_idx]
+        else:
+            layer_type = 'full_attention'
 
-        if layer_type == 'sliding_attention':
+        rope_parameters = getattr(config, 'rope_parameters', None)
+        layer_rope_parameters = {}
+        if isinstance(rope_parameters, dict):
+            layer_rope_parameters = rope_parameters.get(layer_type, {}) or {}
+        elif rope_parameters is not None:
+            res = getattr(rope_parameters, layer_type, None)
+            if isinstance(res, dict):
+                layer_rope_parameters = res
+            elif isinstance(res, ModelConfig):
+                layer_rope_parameters = res.__dict__
+
+        if isinstance(layer_rope_parameters, dict):
+            rope_theta_param = layer_rope_parameters.get('rope_theta', None)
+        else:
+            rope_theta_param = getattr(layer_rope_parameters, 'rope_theta', None)
+
+        if layer_type in ('sliding_attention', 'sliding'):
             rope_theta = (
-                layer_rope_parameters.get('rope_theta')
+                rope_theta_param
                 or getattr(config, 'rope_local_base_freq', None)
                 or 10_000.0
             )
-            sliding_window = config.sliding_window
+            sliding_window = getattr(config, 'sliding_window', 4096)
         else:
             rope_theta = (
-                layer_rope_parameters.get('rope_theta')
+                rope_theta_param
                 or getattr(config, 'rope_theta', None)
                 or 1_000_000.0
             )
@@ -225,10 +244,10 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
             v_axis_names=('embed', 'kv_heads', 'head_dim'),
             o_axis_names=('heads', 'head_dim', 'embed'),
             window_size=sliding_window,
-            scaling=config.query_pre_attn_scalar ** -0.5,
+            scaling=(getattr(config, 'query_pre_attn_scalar', None) or getattr(config, 'head_dim', None) or 256) ** -0.5,
             softcap=getattr(config, 'attn_logit_softcapping', None),
             dropout=getattr(config, 'attention_dropout', None) or 0.0,
-            norm_eps=config.rms_norm_eps,
+            norm_eps=getattr(config, 'rms_norm_eps', None) or 1e-6,
             shard_mode=shard_mode,
             quant=quant,
             dot_general=dot_general,

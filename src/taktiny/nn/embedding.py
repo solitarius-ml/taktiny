@@ -57,6 +57,52 @@ class Embedding(Module):
             return qwix.dequantize(table[indices])
         return table[indices]
 
+    @classmethod
+    def apply_gather_reduce(
+        cls,
+        operand: jax.Array,
+        indices: jax.Array,
+        weights: jax.Array = None,
+        reduce_group_size: int = 1,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Stream Gather Reduce kernel for sparse embeddings / reductions."""
+        from taktiny.kernel.gather_reduce_sc import sc_gather_reduce
+        if jax.default_backend() != "tpu":
+            gathered = operand[indices]
+            if weights is not None:
+                gathered = gathered * weights[..., None]
+            return gathered
+        return sc_gather_reduce(operand, indices, topk_weights=weights, reduce_group_size=reduce_group_size, **kwargs)
+
+    @classmethod
+    def apply_ragged_gather(
+        cls,
+        operand: jax.Array,
+        offsets: jax.Array,
+        lengths: jax.Array,
+        **kwargs,
+    ) -> jax.Array:
+        """Apply Ragged Gather kernel."""
+        from taktiny.kernel.ragged.ragged_gather import ragged_gather
+        return ragged_gather(operand, offsets, lengths, **kwargs)
+
+    @classmethod
+    def apply(
+        cls,
+        operand: jax.Array,
+        indices: jax.Array,
+        kernel: str = "gather_reduce",
+        **kwargs,
+    ) -> jax.Array:
+        """Unified entry point for Embedding sparse gather kernels."""
+        if kernel in ("gather_reduce", "sc_gather_reduce"):
+            return cls.apply_gather_reduce(operand, indices, **kwargs)
+        elif kernel in ("ragged", "ragged_gather"):
+            return cls.apply_ragged_gather(operand, indices, **kwargs)
+        else:
+            return operand[indices]
+
     def extra_repr(self):
         return f"{self.num_embeddings} → {self.embedding_dim}"
 

@@ -21,7 +21,7 @@ from taktiny.maestro._livret import repertoire
 from taktiny.maestro._config import ModelConfig
 from taktiny.cosettes._common import (
     TransformerCausalLM,
-    TransformerMM,
+    TransformerConditionalGeneration,
 )
 from taktiny.cosettes.transformers.qwen import (
     QwenDecoderLayer,
@@ -155,23 +155,62 @@ class Qwen2(TransformerCausalLM):
 
 
 class Qwen3(TransformerCausalLM):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
-    
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Qwen2DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 class Qwen3MoE(TransformerCausalLM):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Qwen2DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 class Qwen3Next(TransformerCausalLM):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Qwen2DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
-class Qwen3HMoE(TransformerMM):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+class Qwen3_5MoE(TransformerConditionalGeneration):
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Qwen2DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 repertoire.register('QwenForCausalLM', Qwen)
@@ -180,7 +219,7 @@ repertoire.register('Qwen2ForCausalLM', Qwen2)
 repertoire.register('Qwen3ForCausalLM', Qwen3)
 repertoire.register('Qwen3MoeForCausalLM', Qwen3MoE)
 repertoire.register('Qwen3NextForCausalLM', Qwen3Next)
-repertoire.register('Qwen3_5MoeForConditionalGeneration', Qwen3HMoE)
+repertoire.register('Qwen3_5MoeForConditionalGeneration', Qwen3_5MoE)
 
 __all__ = [
     'Qwen',
@@ -188,5 +227,5 @@ __all__ = [
     'Qwen3',
     'Qwen3MoE',
     'Qwen3Next',
-    'Qwen3HMoE'
+    'Qwen3_5MoE'
 ]

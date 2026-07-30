@@ -22,7 +22,7 @@ from taktiny.cosettes._common import (
     TransformerCausalLM,
     TransformerConditionalGeneration,
     DiffusionLM,
-    TransformerMM,
+    TransformerConditionalGeneration,
 )
 from taktiny.cosettes.transformers.gemma import (
     GemmaTextScaledWordEmbedding,
@@ -252,20 +252,48 @@ class Gemma3(TransformerCausalLM):
 
 
 class Gemma3ConditionalGeneration(TransformerConditionalGeneration):
-    def __init__(self):
-        raise NotImplementedError(
-            'Gemma3 multimodal conditional generation is not implemented'
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Gemma3DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
         )
 
 
-class Gemma4(TransformerMM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+class Gemma4(TransformerConditionalGeneration):
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Gemma3DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
-class Gemma4Unified(TransformerMM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+class Gemma4Unified(TransformerConditionalGeneration):
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=Gemma3DecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 class DiffusionGemma(DiffusionLM):
