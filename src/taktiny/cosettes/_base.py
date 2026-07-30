@@ -19,6 +19,7 @@ import json
 import re
 import tempfile
 import jax
+import jax.numpy as jnp
 from huggingface_hub import (
     HfApi,
     hf_hub_download,
@@ -257,6 +258,159 @@ class PretrainedModel(Module):
             always_write_index=True,
         )
         return (model_config_path, *checkpoint_paths)
+
+    def load_pretrained(self, path):
+        """Load a Taktiny-native full checkpoint into this model in place.
+
+        This is the inverse of ``save_pretrained`` for full-model checkpoints.
+        Numbered checkpoint layers are reconstructed into ``SeqStack``
+        parameters without applying external checkpoint name mappings or
+        matrix transpositions.
+
+        Args:
+            path: Local directory containing model Safetensors.
+
+        Returns:
+            This model instance.
+        """
+        from safetensors import safe_open
+        import numpy as np
+        import qwix
+
+        path = os.fspath(path)
+        index_path = os.path.join(
+            path,
+            'model.safetensors.index.json',
+        )
+        if os.path.isfile(index_path):
+            with open(index_path) as index_file:
+                index = json.load(index_file)
+            weight_map = index.get('weight_map')
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(
+                    'Model Safetensors index has no weight_map'
+                )
+            filenames = dict.fromkeys(weight_map.values())
+        else:
+            filenames = {'model.safetensors': None}
+
+        parameters = self.flat_parameter_dict()
+        loaded = {}
+        stacked_parameters = {}
+        unexpected = []
+
+        for filename in filenames:
+            checkpoint_path = os.path.join(path, filename)
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(
+                    f'Model checkpoint file was not found: {checkpoint_path}'
+                )
+            with safe_open(
+                checkpoint_path,
+                framework='np',
+                device='cpu',
+            ) as checkpoint:
+                for name in checkpoint.keys():
+                    if name in loaded:
+                        raise ValueError(
+                            f'Duplicate model tensor in checkpoint: {name}'
+                        )
+                    value = checkpoint.get_tensor(name)
+                    if name in parameters:
+                        parameter = parameters[name]
+                        if value.shape != parameter.shape:
+                            raise ValueError(
+                                f'Model tensor {name!r} has shape '
+                                f'{value.shape}, expected {parameter.shape}'
+                            )
+                        loaded[name] = value
+                        continue
+
+                    matched_stack = False
+                    parts = name.split('.')
+                    for position, part in enumerate(parts):
+                        if not part.isdigit():
+                            continue
+                        stacked_parts = list(parts)
+                        stacked_parts[position] = 'stacked'
+                        stacked_name = '.'.join(stacked_parts)
+                        if stacked_name not in parameters:
+                            continue
+
+                        parameter = parameters[stacked_name]
+                        layer_index = int(part)
+                        if layer_index >= parameter.shape[0]:
+                            raise ValueError(
+                                f'Model layer index {layer_index} is out of '
+                                f'range for {stacked_name!r}'
+                            )
+                        expected_shape = parameter.shape[1:]
+                        if value.shape != expected_shape:
+                            raise ValueError(
+                                f'Model tensor {name!r} has shape '
+                                f'{value.shape}, expected {expected_shape}'
+                            )
+                        entry = stacked_parameters.setdefault(
+                            stacked_name,
+                            {
+                                'values': np.empty(
+                                    parameter.shape,
+                                    dtype=value.dtype,
+                                ),
+                                'indices': set(),
+                            },
+                        )
+                        if layer_index in entry['indices']:
+                            raise ValueError(
+                                f'Duplicate model layer tensor: {name}'
+                            )
+                        entry['values'][layer_index] = value
+                        entry['indices'].add(layer_index)
+                        matched_stack = True
+                        break
+
+                    if not matched_stack:
+                        unexpected.append(name)
+
+        if unexpected:
+            preview = ', '.join(sorted(unexpected)[:8])
+            raise ValueError(
+                f'Model checkpoint contains unexpected tensors: {preview}'
+            )
+
+        for name, entry in stacked_parameters.items():
+            parameter = parameters[name]
+            expected_indices = set(range(parameter.shape[0]))
+            missing_indices = expected_indices - entry['indices']
+            if missing_indices:
+                missing = ', '.join(map(str, sorted(missing_indices)))
+                raise ValueError(
+                    f'Model checkpoint is missing layers {missing} '
+                    f'for {name!r}'
+                )
+            loaded[name] = entry['values']
+
+        missing = sorted(set(parameters) - set(loaded))
+        if missing:
+            preview = ', '.join(missing[:8])
+            raise ValueError(
+                f'Model checkpoint is missing tensors: {preview}'
+            )
+
+        for name, value in loaded.items():
+            parameter = parameters[name]
+            if isinstance(parameter.value, qwix.QArray):
+                raise TypeError(
+                    'Loading a dense native checkpoint into an existing '
+                    f'quantized parameter is unsupported: {name}'
+                )
+            array = jnp.asarray(value, dtype=parameter.dtype)
+            sharding = getattr(parameter.value, 'sharding', None)
+            if sharding is not None:
+                array = jax.device_put(array, sharding)
+            parameter.value = array
+
+        return self
 
     def push_to_hub(
         self,

@@ -38,6 +38,11 @@ class TrainingConfig:
     save_at_end: bool = False
     save_optimizer_state: bool = True
     max_shard_size: int | str = '5GB'
+    eval_strategy: str = 'no'
+    eval_steps: Optional[int] = None
+    metric_for_best_model: str = 'eval_loss'
+    greater_is_better: Optional[bool] = None
+    load_best_model_at_end: bool = False
 
     def __post_init__(self):
         if self.epochs < 1:
@@ -70,11 +75,50 @@ class TrainingConfig:
             raise TypeError('save_at_end must be a boolean')
         if not isinstance(self.save_optimizer_state, bool):
             raise TypeError('save_optimizer_state must be a boolean')
+        if self.eval_strategy not in {'no', 'steps', 'epoch'}:
+            raise ValueError(
+                'eval_strategy must be "no", "steps", or "epoch"'
+            )
+        if (
+            self.eval_steps is not None
+            and (
+                isinstance(self.eval_steps, bool)
+                or not isinstance(self.eval_steps, int)
+                or self.eval_steps < 1
+            )
+        ):
+            raise ValueError('eval_steps must be a positive integer or None')
+        if self.eval_strategy == 'steps' and self.eval_steps is None:
+            raise ValueError(
+                'eval_steps is required when eval_strategy="steps"'
+            )
+        if not (
+            isinstance(self.metric_for_best_model, str)
+            and self.metric_for_best_model
+        ):
+            raise TypeError(
+                'metric_for_best_model must be a non-empty string'
+            )
+        if (
+            self.greater_is_better is not None
+            and not isinstance(self.greater_is_better, bool)
+        ):
+            raise TypeError('greater_is_better must be a boolean or None')
+        if not isinstance(self.load_best_model_at_end, bool):
+            raise TypeError('load_best_model_at_end must be a boolean')
+        if (
+            self.load_best_model_at_end
+            and self.eval_strategy == 'no'
+        ):
+            raise ValueError(
+                'load_best_model_at_end requires evaluation'
+            )
         if (
             self.output_dir is None
             and (
                 self.save_steps is not None
                 or self.save_at_end
+                or self.load_best_model_at_end
             )
         ):
             raise ValueError(
