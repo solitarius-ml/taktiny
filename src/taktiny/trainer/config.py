@@ -25,6 +25,7 @@ class TrainingConfig:
     epochs: int = 1
     max_steps: Optional[int] = None
     learning_rate: float = 1e-3
+    schedule: Optional[Callable] = None
     optimizer: Any = None # Optax optimizer, defaults to adamw if None
     weight_decay: float = 0.0
     log_interval: int = 10
@@ -57,6 +58,8 @@ class TrainingConfig:
             raise ValueError('max_steps must be a positive integer or None')
         if self.log_interval < 1:
             raise ValueError('log_interval must be a positive integer')
+        if self.schedule is not None and not callable(self.schedule):
+            raise TypeError('schedule must be callable or None')
         if not isinstance(self.remat, bool):
             raise TypeError('remat must be a boolean')
         if (

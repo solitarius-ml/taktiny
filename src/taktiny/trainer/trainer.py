@@ -298,11 +298,26 @@ class Trainer:
         """Configure an optimizer for the trainable parameter partition."""
         base_opt = self.training_config.optimizer
         if base_opt is None:
+            learning_rate = (
+                self.training_config.schedule
+                if self.training_config.schedule is not None
+                else self.training_config.learning_rate
+            )
             base_opt = optax.adamw(
-                self.training_config.learning_rate,
+                learning_rate,
                 weight_decay=self.training_config.weight_decay,
             )
         return base_opt
+
+    def _learning_rate_at_step(self, step):
+        """Return the rate used by a completed optimizer update."""
+        schedule = self.training_config.schedule
+        if schedule is None:
+            if self.training_config.optimizer is not None:
+                return None
+            return float(self.training_config.learning_rate)
+        value = schedule(max(0, step - 1))
+        return float(jax.device_get(value))
 
     def _place_batch(self, batch):
         sharding = self.dataset_config.batch_sharding
@@ -1105,11 +1120,13 @@ class Trainer:
                     iteration_time = _format_iteration_time(
                         seconds_per_step
                     )
+                    learning_rate = self._learning_rate_at_step(step)
                     self.log_history.append({
                         'step': step,
                         'epoch': current_epoch,
                         'loss': loss,
                         'seconds_per_step': seconds_per_step,
+                        'learning_rate': learning_rate,
                         'grad_norm': grad_norm,
                         'loss_scale': self.loss_scale,
                         'skipped_update': update_skipped,
@@ -1119,11 +1136,17 @@ class Trainer:
                         if loss is not None
                         else 'non-finite'
                     )
+                    learning_rate_text = (
+                        f' ┃ LR: [bold green]'
+                        f'{learning_rate:.3e}[/bold green]'
+                        if learning_rate is not None
+                        else ''
+                    )
                     progress.console.print(
                         f"[bold cyan]Epoch {current_epoch:<3}[/bold cyan] ┃ "
                         f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
                         f"Loss: [bold magenta]{loss_text}"
-                        f"[/bold magenta] ┃ "
+                        f"[/bold magenta]{learning_rate_text} ┃ "
                         f"[dim]{iteration_time:>11}[/dim]"
                     )
                     start_time = time.time()
@@ -1327,11 +1350,13 @@ class Trainer:
                     (time.time() - start_time)
                     / max(1, steps_since_log)
                 )
+                learning_rate = self._learning_rate_at_step(step)
                 self.log_history.append({
                     'step': step,
                     'epoch': epoch,
                     'loss': loss,
                     'seconds_per_step': seconds_per_step,
+                    'learning_rate': learning_rate,
                     'grad_norm': grad_norm,
                     'loss_scale': self.loss_scale,
                     'skipped_update': update_skipped,
@@ -1339,11 +1364,17 @@ class Trainer:
                 loss_text = (
                     f'{loss:<7.4f}' if loss is not None else 'non-finite'
                 )
+                learning_rate_text = (
+                    f' ┃ LR: [bold green]'
+                    f'{learning_rate:.3e}[/bold green]'
+                    if learning_rate is not None
+                    else ''
+                )
                 progress.console.print(
                     f"[bold cyan]Epoch {epoch:<3}[/bold cyan] ┃ "
                     f"[bold yellow]Step {step:<6}[/bold yellow] ┃ "
                     f"Loss: [bold magenta]{loss_text}"
-                    f"[/bold magenta] ┃ "
+                    f"[/bold magenta]{learning_rate_text} ┃ "
                     f"[dim]{_format_iteration_time(seconds_per_step):>11}"
                     f"[/dim]"
                 )
