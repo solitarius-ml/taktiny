@@ -400,15 +400,17 @@ class TransformerModel(nn.Module):
             zero-based ``layer_idx`` when instantiated.
         embedding: Embedding ``nn.Module`` subclass or initialized instance.
         norm: Optional final normalization module type or instance.
-        compact: Store decoder layers in an ``nn.SeqStack`` and execute them
-            with ``scan`` instead of storing them in an ``nn.List``.
+        use_list: Store decoder layers in an ``nn.List``. When false, store
+            them in an ``nn.SeqStack`` and execute them with ``scan``.
 
     Returns:
         A tuple containing the final hidden states and an updated stacked
         ``(key_cache, value_cache)``, or ``None`` when caching is disabled.
     """
 
-    def __init__(self, config, *, rngs, module, embedding, norm=None, compact=False):
+    def __init__(
+        self, config, *, rngs, module, embedding, norm=None, use_list=True
+    ):
         num_hidden_layers = getattr(config, 'num_hidden_layers', None)
         vocab_size = getattr(config, 'vocab_size', None)
         hidden_size = getattr(config, 'hidden_size', None)
@@ -452,23 +454,23 @@ class TransformerModel(nn.Module):
         if hasattr(self.embed_tokens, 'embedding'):
             self.embed_tokens.embedding.axis_names = ('vocab', 'embed')
 
-        self.compact = compact
-        if compact:
-            def compact_layers():
+        self.use_list = use_list
+        if use_list:
+            self.layers = nn.List(
+                *(
+                    module(config, rngs=rngs, layer_idx=layer_idx)
+                    for layer_idx in range(num_hidden_layers)
+                )
+            )
+        else:
+            def stacked_layers():
                 for layer_idx in range(num_hidden_layers):
                     layer = module(config, rngs=rngs, layer_idx=layer_idx)
                     layer.layer_idx = None
                     yield layer
 
             self.layers = nn.SeqStack(
-                compact_layers()
-            )
-        else:
-            self.layers = nn.List(
-                *(
-                    module(config, rngs=rngs, layer_idx=layer_idx)
-                    for layer_idx in range(num_hidden_layers)
-                )
+                stacked_layers()
             )
 
         self.norm = None
@@ -493,6 +495,11 @@ class TransformerModel(nn.Module):
                 'norm must be a normalization nn.Module subclass or instance'
             )
 
+        self.remat = False
+
+    def enable_remat(self):
+        self.remat = True
+
     def __call__(
         self,
         x: jax.Array,
@@ -503,6 +510,22 @@ class TransformerModel(nn.Module):
         out_sharding=None,
     ):
         x = self.embed_tokens(x)
+
+        def call_layer(layer, hidden_states, layer_cache):
+            return layer(
+                hidden_states,
+                attention_mask=attention_mask,
+                kv_cache=layer_cache,
+                position_idx=position_idx,
+                is_causal=is_causal,
+                out_sharding=out_sharding,
+            )
+
+        if self.remat:
+            call_layer = jax.checkpoint(
+                call_layer,
+                prevent_cse=self.use_list,
+            )
 
         if kv_cache is not None:
             if len(kv_cache) != 2:
@@ -518,7 +541,7 @@ class TransformerModel(nn.Module):
                     'value cache must have one entry for each transformer layer'
                 )
 
-        if self.compact:
+        if not self.use_list:
             def apply_layer(layer, carry):
                 hidden_states, layer_idx = carry
                 layer_cache = None
@@ -538,13 +561,10 @@ class TransformerModel(nn.Module):
                         ),
                     )
 
-                hidden_states, updated_cache = layer(
+                hidden_states, updated_cache = call_layer(
+                    layer,
                     hidden_states,
-                    attention_mask=attention_mask,
-                    kv_cache=layer_cache,
-                    position_idx=position_idx,
-                    is_causal=is_causal,
-                    out_sharding=out_sharding,
+                    layer_cache,
                 )
                 return (hidden_states, layer_idx + 1), updated_cache
 
@@ -563,13 +583,10 @@ class TransformerModel(nn.Module):
                         value_cache[layer_idx],
                     )
 
-                x, new_cache = layer(
+                x, new_cache = call_layer(
+                    layer,
                     x,
-                    attention_mask=attention_mask,
-                    kv_cache=layer_cache,
-                    position_idx=position_idx,
-                    is_causal=is_causal,
-                    out_sharding=out_sharding,
+                    layer_cache,
                 )
 
                 if new_cache is not None:
@@ -617,6 +634,8 @@ class TransformerCausalLM(PretrainedModel):
             tied embedding projection or ``nn.Linear`` is selected from config.
         mesh: Optional JAX device mesh used for explicit sharding.
         sharding_rules: Optional logical-to-mesh axis mapping rules.
+        use_list: Store decoder layers in an ``nn.List``. When false, use an
+            ``nn.SeqStack`` executed with ``scan``.
 
     Returns:
         A tuple containing vocabulary logits and the updated
@@ -643,7 +662,7 @@ class TransformerCausalLM(PretrainedModel):
         lm_head = None,
         mesh: jax.sharding.Mesh = None,
         sharding_rules: Optional[List[Tuple]] = None,
-        compact = False
+        use_list=True,
     ):
         if decoder is None:
             raise ValueError('decoder is required')
@@ -675,7 +694,7 @@ class TransformerCausalLM(PretrainedModel):
             module=decoder,
             embedding=embedding,
             norm=norm,
-            compact=compact
+            use_list=use_list,
         )
 
         tied = getattr(config, 'tie_word_embeddings', None) # maybe
@@ -727,6 +746,9 @@ class TransformerCausalLM(PretrainedModel):
                 ('batch', 'sequence', 'vocab'),
                 rules=sharding_rules,
             )
+
+    def enable_remat(self):
+        self.model.enable_remat()
 
     def __getattr__(self, name):
         if (
@@ -1009,7 +1031,7 @@ class TransformerCausalLM(PretrainedModel):
         repetition_penalty,
         eos_token_id,
         pad_token_id,
-        key,
+        seed,
     ):
         if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
             raise ValueError('max_new_tokens must be a positive integer')
@@ -1075,8 +1097,9 @@ class TransformerCausalLM(PretrainedModel):
             pad_token_id = eos_values[0] if eos_values else 0
         pad_token_id = int(pad_token_id)
 
-        if key is None:
-            key = jax.random.key(42)
+        if not isinstance(seed, int):
+            raise TypeError('seed must be an integer')
+        key = jax.random.key(seed)
 
         num_layers = getattr(self.config, 'num_hidden_layers', None)
         num_heads = getattr(self.config, 'num_attention_heads', None)
@@ -1189,7 +1212,7 @@ class TransformerCausalLM(PretrainedModel):
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
-        key: jax.Array = None,
+        seed: int = 42,
         attention_mask: jax.Array = None,
         repetition_penalty: float = 1.0,
         eos_token_id: int | Sequence[int] = None,
@@ -1215,7 +1238,7 @@ class TransformerCausalLM(PretrainedModel):
                     temperature=temperature,
                     top_k=top_k,
                     top_p=top_p,
-                    key=key,
+                    seed=seed,
                     attention_mask=attention_mask,
                     repetition_penalty=repetition_penalty,
                     eos_token_id=eos_token_id,
@@ -1246,7 +1269,7 @@ class TransformerCausalLM(PretrainedModel):
             repetition_penalty=repetition_penalty,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
-            key=key,
+            seed=seed,
         )
         max_seq_len, eos_token_ids, pad_token_id = settings
         batch_size = input_ids.shape[0]
@@ -1294,7 +1317,7 @@ class TransformerCausalLM(PretrainedModel):
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
-        key: jax.Array = None,
+        seed: int = 42,
         attention_mask: jax.Array = None,
         repetition_penalty: float = 1.0,
         eos_token_id: int | Sequence[int] = None,
@@ -1314,7 +1337,7 @@ class TransformerCausalLM(PretrainedModel):
             repetition_penalty=repetition_penalty,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
-            key=key,
+            seed=seed,
         )
         max_seq_len, eos_token_ids, pad_token_id = settings
         yield carry[0]

@@ -12,3 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Transformer architectures"""
+
+from taktiny.cosettes.transformers.gemma import *
+from taktiny.cosettes.transformers.llama import *
+from taktiny.cosettes.transformers.qwen import *

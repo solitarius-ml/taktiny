@@ -12,6 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .trainer import *
-from .config import *
-from .callbacks import *
+from __future__ import annotations
+
+from taktiny.takt import *

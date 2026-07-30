@@ -16,7 +16,41 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import json
+import os
 from typing import Any
+
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import EntryNotFoundError
+from safetensors import safe_open
+
+from taktiny.nn.module import Module, iter_children
+
+
+def _replace_child(parent, name, child):
+    if name.isdigit() and hasattr(parent, 'layers'):
+        position = int(name)
+        if isinstance(parent.layers, tuple):
+            updated = list(parent.layers)
+            updated[position] = child
+            parent.layers = tuple(updated)
+        else:
+            parent.layers[position] = child
+        return
+
+    if '.' in name:
+        attribute, index = name.rsplit('.', 1)
+        sequence = getattr(parent, attribute)
+        position = int(index)
+        if isinstance(sequence, tuple):
+            updated = list(sequence)
+            updated[position] = child
+            setattr(parent, attribute, tuple(updated))
+        else:
+            sequence[position] = child
+        return
+
+    setattr(parent, name, child)
 
 
 class Takt:
@@ -29,6 +63,8 @@ class Takt:
     """
 
     _peft_methods: dict[type, Callable[[Any, Any], Any]] = {}
+    _peft_mergers: dict[type, Callable[..., Any]] = {}
+    _peft_loaders: dict[str, Callable[..., Any]] = {}
 
     @classmethod
     def register_peft(cls, config_type: type):
@@ -53,6 +89,38 @@ class Takt:
                     'PEFT implementation'
                 )
             cls._peft_methods[config_type] = implementation
+            return implementation
+
+        return decorator
+
+    @classmethod
+    def register_peft_merger(cls, module_type: type):
+        """Register the merge implementation for a PEFT wrapper module."""
+
+        def decorator(implementation):
+            registered = cls._peft_mergers.get(module_type)
+            if registered is not None and registered is not implementation:
+                raise ValueError(
+                    f'{module_type.__name__} already has a registered '
+                    'PEFT merger'
+                )
+            cls._peft_mergers[module_type] = implementation
+            return implementation
+
+        return decorator
+
+    @classmethod
+    def register_peft_loader(cls, peft_type: str):
+        """Register a checkpoint loader for a serialized PEFT type."""
+        normalized_type = peft_type.upper()
+
+        def decorator(implementation):
+            registered = cls._peft_loaders.get(normalized_type)
+            if registered is not None and registered is not implementation:
+                raise ValueError(
+                    f'{normalized_type} already has a registered PEFT loader'
+                )
+            cls._peft_loaders[normalized_type] = implementation
             return implementation
 
         return decorator
@@ -91,6 +159,207 @@ class Takt:
                 f'{type(config).__name__}'
             )
         return implementation(model, config)
+
+    @classmethod
+    def load_peft(
+        cls,
+        model,
+        path_or_repo,
+        *,
+        local=None,
+        token=None,
+        revision=None,
+        subfolder=None,
+        rngs=None,
+    ):
+        """Load a saved PEFT adapter into an existing base model.
+
+        Local directories are detected automatically. Hub repositories support
+        revisions, private-repository tokens, subfolders, and sharded adapter
+        Safetensors indexes.
+
+        Args:
+            model: Existing base model or a model with matching PEFT wrappers.
+            path_or_repo: Local adapter directory or Hub repository ID.
+            local: Override automatic local-directory detection.
+            token: Hugging Face authentication token or token-selection flag.
+            revision: Optional Hub branch, tag, or commit.
+            subfolder: Optional adapter subdirectory.
+            rngs: Optional RNG collection used when adapter wrappers must be
+                created before loading their saved values.
+
+        Returns:
+            The same model instance with loaded adapter parameters.
+        """
+        if not isinstance(model, Module):
+            raise TypeError(
+                'PEFT loading currently requires a Taktiny nn.Module model'
+            )
+
+        source = os.fspath(path_or_repo)
+        if local is None:
+            local = os.path.isdir(source)
+
+        def local_path(filename):
+            parts = [source]
+            if subfolder:
+                parts.append(os.fspath(subfolder))
+            parts.append(filename)
+            return os.path.join(*parts)
+
+        def resolve(filename):
+            if local:
+                resolved = local_path(filename)
+                if not os.path.isfile(resolved):
+                    raise FileNotFoundError(
+                        f'Adapter file was not found: {resolved}'
+                    )
+                return resolved
+            return hf_hub_download(
+                repo_id=source,
+                filename=filename,
+                subfolder=subfolder,
+                revision=revision,
+                token=token,
+            )
+
+        config_path = resolve('adapter_config.json')
+        with open(config_path) as config_file:
+            adapter_config = json.load(config_file)
+
+        peft_type = str(adapter_config.get('peft_type', '')).upper()
+        implementation = cls._peft_loaders.get(peft_type)
+        if implementation is None:
+            raise NotImplementedError(
+                f'Unsupported saved PEFT type: {peft_type or "<missing>"}'
+            )
+
+        index_filename = 'adapter_model.safetensors.index.json'
+        index_path = None
+        if local:
+            candidate = local_path(index_filename)
+            if os.path.isfile(candidate):
+                index_path = candidate
+        else:
+            try:
+                index_path = resolve(index_filename)
+            except EntryNotFoundError:
+                pass
+
+        if index_path is None:
+            adapter_files = [resolve('adapter_model.safetensors')]
+        else:
+            with open(index_path) as index_file:
+                index = json.load(index_file)
+            weight_map = index.get('weight_map')
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(
+                    'Adapter Safetensors index has no weight_map'
+                )
+            filenames = dict.fromkeys(weight_map.values())
+            adapter_files = [
+                resolve(filename)
+                for filename in filenames
+            ]
+
+        adapter_state = {}
+        for adapter_file in adapter_files:
+            with safe_open(
+                adapter_file,
+                framework='np',
+                device='cpu',
+            ) as checkpoint:
+                for name in checkpoint.keys():
+                    if name in adapter_state:
+                        raise ValueError(
+                            f'Duplicate adapter tensor in checkpoint: {name}'
+                        )
+                    adapter_state[name] = checkpoint.get_tensor(name)
+
+        return implementation(
+            model,
+            adapter_config,
+            adapter_state,
+            rngs=rngs,
+        )
+
+    @classmethod
+    def merge_peft(cls, model, *, dtype=None, quant=None):
+        """Merge PEFT adapter weights into their base modules in place.
+
+        Adapter calculations are performed in float32. ``dtype`` controls the
+        merged dense-weight dtype, while ``quant`` optionally requantizes the
+        merged weights using Taktiny's Qwix quantization rules.
+
+        Args:
+            model: Existing Taktiny model containing PEFT wrapper modules.
+            dtype: Optional floating-point dtype for merged dense weights.
+                Dense base weights retain their dtype when omitted. Quantized
+                weights use their dequantized dtype.
+            quant: Optional Qwix quantization rule, provider, or qtype string
+                applied after merging.
+
+        Returns:
+            The same model instance with adapters merged and removed.
+
+        Raises:
+            TypeError: If ``model`` is not a Taktiny module.
+            ValueError: If no registered mergeable PEFT modules are found.
+        """
+        if not isinstance(model, Module):
+            raise TypeError(
+                'PEFT merging currently requires a Taktiny nn.Module model'
+            )
+
+        merged = []
+
+        def merger_for(module):
+            implementation = cls._peft_mergers.get(type(module))
+            if implementation is not None:
+                return implementation
+            return next(
+                (
+                    candidate
+                    for module_type, candidate in cls._peft_mergers.items()
+                    if isinstance(module, module_type)
+                ),
+                None,
+            )
+
+        def transform(module, prefix=''):
+            for name, child in list(iter_children(module)):
+                full_name = f'{prefix}.{name}' if prefix else name
+                implementation = merger_for(child)
+                if implementation is not None:
+                    replacement = implementation(
+                        child,
+                        dtype=dtype,
+                        quant=quant,
+                        module_path=full_name,
+                    )
+                    _replace_child(module, name, replacement)
+                    merged.append(full_name)
+                elif isinstance(child, Module):
+                    transform(child, full_name)
+
+        transform(model)
+        if not merged:
+            raise ValueError('No mergeable PEFT modules were found in model')
+
+        trainable_state = getattr(
+            model,
+            '_peft_trainable_state',
+            None,
+        )
+        if trainable_state is not None:
+            for name, parameter in model.flat_parameter_dict().items():
+                if name in trainable_state:
+                    parameter.trainable = trainable_state[name]
+            delattr(model, '_peft_trainable_state')
+
+        if hasattr(model, 'peft_config'):
+            delattr(model, 'peft_config')
+        return model
 
 
 __all__ = ['Takt']
