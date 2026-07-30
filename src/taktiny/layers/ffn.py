@@ -149,6 +149,10 @@ class FusedGateMLP(Module):
         **kwargs,
     ) -> jax.Array:
         """Unified entry point for MoE GMM kernel application."""
+        if not isinstance(kernel, str):
+            raise TypeError(
+                f'kernel must be a string, got {type(kernel).__name__}'
+            )
         kernel = kernel.lower()
         if kernel == "gmm":
             return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)
@@ -230,6 +234,10 @@ class MoeFFN(Module):
         **kwargs,
     ) -> jax.Array:
         """Unified entry point for MoE GMM kernel application."""
+        if not isinstance(kernel, str):
+            raise TypeError(
+                f'kernel must be a string, got {type(kernel).__name__}'
+            )
         kernel = kernel.lower()
         if kernel == "gmm":
             return cls.apply_gmm(lhs, rhs, group_sizes, **kwargs)

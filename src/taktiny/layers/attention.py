@@ -514,6 +514,10 @@ class Attention(nn.Module):
         Unified Entry Point for Attention Kernel Applications.
         Supported kernel methods: 'dot_product', 'flash', 'ragged', 'splash', 'ring'.
         """
+        if not isinstance(kernel, str):
+            raise TypeError(
+                f'kernel must be a string, got {type(kernel).__name__}'
+            )
         kernel = kernel.lower()
         if kernel in ("dot_product", "standard", "jax"):
             return jax.nn.dot_product_attention(
