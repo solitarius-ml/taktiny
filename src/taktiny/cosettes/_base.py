@@ -16,46 +16,337 @@ from __future__ import annotations
 
 import os
 import json
+import re
+import tempfile
 import jax
-from huggingface_hub import hf_hub_download
+from huggingface_hub import (
+    HfApi,
+    hf_hub_download,
+    split_state_dict_into_shards_factory,
+)
 from safetensors.flax import save_file
 from taktiny.nn import Module, Rngs
+from taktiny.nn.module import iter_children
 
 
 class PretrainedModel(Module):
     """Base class for models that load and save pretrained checkpoints.
 
-    Models are serialized as Safetensors together with a weight index. Loading
-    first constructs an abstract parameter tree with ``jax.eval_shape``, then
-    maps checkpoint names to module paths, applies any requested quantization,
-    and places arrays using parameter sharding metadata.
+    Full models are serialized as Safetensors together with a weight index.
+    LoRA-transformed models instead save adapter tensors and reconstruction
+    metadata. Loading first constructs an abstract parameter tree with
+    ``jax.eval_shape``, then maps checkpoint names to module paths, applies any
+    requested quantization, and places arrays using parameter sharding metadata.
 
     Subclasses are expected to accept ``config`` and ``rngs`` in their
     constructor. They may provide module-mapping rules to translate external
     checkpoint names and may expose default logical sharding rules.
     """
 
-    def save_pretrained(self, path):
-        """
-        Saves the model's weights to a local directory in safetensors format.
-        Always saves an index json for unified loading.
+    def _config_dict(self):
+        config = getattr(self, 'config', None)
+        if config is None:
+            return {}
+        if isinstance(config, dict):
+            return dict(config)
+        to_dict = getattr(config, 'to_dict', None)
+        if callable(to_dict):
+            return to_dict()
+        return {
+            key: value
+            for key, value in vars(config).items()
+            if not key.startswith('_')
+        }
+
+    def _save_config(self, path):
+        config_path = os.path.join(path, 'config.json')
+        with open(config_path, 'w') as config_file:
+            json.dump(
+                self._config_dict(),
+                config_file,
+                indent=2,
+                default=str,
+            )
+        return config_path
+
+    def _lora_state_dict(self):
+        from taktiny.nn.lora import LoRALinear
+
+        state = {}
+
+        def collect(module, prefix=''):
+            for name, child in iter_children(module):
+                full_name = f'{prefix}.{name}' if prefix else name
+                if isinstance(child, LoRALinear):
+                    state[f'{full_name}.lora_A'] = child.lora_A.value
+                    state[f'{full_name}.lora_B'] = child.lora_B.value
+                elif isinstance(child, Module):
+                    collect(child, full_name)
+
+        collect(self)
+        return state
+
+    @staticmethod
+    def _expand_stacked_state_dict(state):
+        layout = []
+        stacked_groups = {}
+
+        for name, value in state.items():
+            parts = name.split('.')
+            if 'stacked' not in parts:
+                layout.append(('parameter', name, value))
+                continue
+
+            stacked_index = parts.index('stacked')
+            group_key = (tuple(parts[:stacked_index]), stacked_index)
+            if group_key not in stacked_groups:
+                stacked_groups[group_key] = []
+                layout.append(('stack', group_key))
+            stacked_groups[group_key].append((parts, value))
+
+        expanded = {}
+        for entry in layout:
+            if entry[0] == 'parameter':
+                _, name, value = entry
+                expanded[name] = value
+                continue
+
+            _, group_key = entry
+            group = stacked_groups[group_key]
+            stacked_index = group_key[1]
+            num_layers = None
+            for parts, value in group:
+                name = '.'.join(parts)
+                if not getattr(value, 'shape', ()):
+                    raise ValueError(
+                        f'Stacked parameter {name!r} has no leading layer axis'
+                    )
+                if num_layers is None:
+                    num_layers = value.shape[0]
+                elif value.shape[0] != num_layers:
+                    raise ValueError(
+                        'Parameters in the same stack have inconsistent '
+                        f'layer counts: expected {num_layers}, found '
+                        f'{value.shape[0]} for {name!r}'
+                    )
+
+            for layer_index in range(num_layers):
+                for parts, value in group:
+                    layer_parts = list(parts)
+                    layer_parts[stacked_index] = str(layer_index)
+                    expanded['.'.join(layer_parts)] = value[layer_index]
+
+        return expanded
+
+    @staticmethod
+    def _save_safetensors(
+        state,
+        path,
+        filename,
+        *,
+        max_shard_size,
+        always_write_index=False,
+    ):
+        stem, extension = os.path.splitext(filename)
+        split = split_state_dict_into_shards_factory(
+            state,
+            get_storage_size=lambda value: int(value.nbytes),
+            filename_pattern=f'{stem}{{suffix}}{extension}',
+            max_shard_size=max_shard_size,
+        )
+
+        shard_pattern = re.compile(
+            rf'{re.escape(stem)}-\d{{5}}-of-\d{{5}}'
+            rf'{re.escape(extension)}'
+        )
+        for existing_filename in os.listdir(path):
+            if (
+                existing_filename == filename
+                or shard_pattern.fullmatch(existing_filename)
+                or existing_filename == f'{filename}.index.json'
+            ):
+                os.remove(os.path.join(path, existing_filename))
+
+        saved_paths = []
+        for shard_filename, tensor_names in (
+            split.filename_to_tensors.items()
+        ):
+            shard_path = os.path.join(path, shard_filename)
+            save_file(
+                {name: state[name] for name in tensor_names},
+                shard_path,
+            )
+            saved_paths.append(shard_path)
+
+        if split.is_sharded or always_write_index:
+            index_path = os.path.join(
+                path,
+                f'{filename}.index.json',
+            )
+            with open(index_path, 'w') as index_file:
+                json.dump(
+                    {
+                        'metadata': split.metadata,
+                        'weight_map': split.tensor_to_filename,
+                    },
+                    index_file,
+                    indent=2,
+                )
+            saved_paths.append(index_path)
+
+        return tuple(saved_paths)
+
+    def save_pretrained(self, path, max_shard_size='5GB'):
+        """Save a full model checkpoint or the model's LoRA adapters.
+
+        Models containing ``LoRALinear`` modules save only adapter tensors and
+        their reconstruction metadata. Models without LoRA save their complete
+        parameter state and a Safetensors index. Parameters held by a
+        ``SeqStack`` are expanded into conventional numbered layer keys.
+
+        Args:
+            path: Directory in which to write the checkpoint.
+            max_shard_size: Maximum tensor data size per Safetensors file,
+                expressed as an integer byte count or a string using ``KB``,
+                ``MB``, ``GB``, or ``TB``, such as ``"5GB"``. A tensor larger
+                than the limit is saved alone without being split.
+
+        Returns:
+            A tuple containing the paths written by this invocation, with
+            configuration files first, followed by weight files and their
+            index when present.
         """
         os.makedirs(path, exist_ok=True)
-        weights_path = os.path.join(path, "model.safetensors")
-        index_path = os.path.join(path, "model.safetensors.index.json")
-        
-        # Extract flat state dict (mapping string paths to JAX arrays)
-        state_dict = self.flat_state_dict()
-        save_file(state_dict, weights_path)
-        
-        # Always create an index file for consistency
-        index_data = {
-            "metadata": {"total_size": os.path.getsize(weights_path)},
-            "weight_map": {k: "model.safetensors" for k in state_dict.keys()}
-        }
-        with open(index_path, "w") as f:
-            json.dump(index_data, f, indent=2)
-            
+        model_config_path = self._save_config(path)
+
+        adapter_state = self._expand_stacked_state_dict(
+            self._lora_state_dict()
+        )
+        if adapter_state:
+            adapter_path = os.path.join(path, 'adapter_model.safetensors')
+            config_path = os.path.join(path, 'adapter_config.json')
+            peft_config = getattr(self, 'peft_config', None)
+            if peft_config is None:
+                raise ValueError(
+                    'LoRA modules were found but PEFT configuration metadata '
+                    'is missing; apply LoRA through Takt.apply_peft'
+                )
+
+            adapter_paths = self._save_safetensors(
+                adapter_state,
+                path,
+                os.path.basename(adapter_path),
+                max_shard_size=max_shard_size,
+            )
+            with open(config_path, 'w') as config_file:
+                json.dump(peft_config, config_file, indent=2)
+            return (
+                model_config_path,
+                config_path,
+                *adapter_paths,
+            )
+
+        state_dict = self._expand_stacked_state_dict(
+            self.flat_state_dict()
+        )
+        checkpoint_paths = self._save_safetensors(
+            state_dict,
+            path,
+            'model.safetensors',
+            max_shard_size=max_shard_size,
+            always_write_index=True,
+        )
+        return (model_config_path, *checkpoint_paths)
+
+    def push_to_hub(
+        self,
+        repo_id,
+        *,
+        commit_message=None,
+        commit_description=None,
+        private=None,
+        token=None,
+        revision=None,
+        create_pr=False,
+        max_shard_size='5GB',
+    ) -> str:
+        """Save and upload this model or adapter to the Hugging Face Hub.
+
+        The checkpoint is staged in a temporary directory and removed after
+        the upload completes. Existing unrelated repository files are
+        preserved, while obsolete shards belonging to the uploaded checkpoint
+        family are deleted in the same commit.
+
+        Args:
+            repo_id: Hub repository identifier, optionally including an
+                organization or username.
+            commit_message: Optional Hub commit title.
+            commit_description: Optional longer commit description.
+            private: Visibility used when creating a new repository.
+            token: Hugging Face authentication token or token-selection flag.
+            revision: Branch or revision to receive the commit.
+            create_pr: Whether to create a pull request instead of committing
+                directly to the target revision.
+            max_shard_size: Maximum size passed to ``save_pretrained``.
+
+        Returns:
+            The URL of the created Hub commit or pull request.
+        """
+        api = HfApi(
+            token=token,
+            library_name='taktiny',
+        )
+        repo = api.create_repo(
+            repo_id=repo_id,
+            private=private,
+            token=token,
+            repo_type='model',
+            exist_ok=True,
+        )
+        resolved_repo_id = getattr(repo, 'repo_id', repo_id)
+
+        if revision is not None and not revision.startswith('refs/pr'):
+            api.create_branch(
+                repo_id=resolved_repo_id,
+                branch=revision,
+                token=token,
+                exist_ok=True,
+            )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            saved_paths = self.save_pretrained(
+                temporary_directory,
+                max_shard_size=max_shard_size,
+            )
+            filenames = {
+                os.path.basename(path)
+                for path in saved_paths
+            }
+            is_adapter = any(
+                filename.startswith('adapter_model')
+                for filename in filenames
+            )
+            stem = 'adapter_model' if is_adapter else 'model'
+            delete_patterns = [
+                f'{stem}.safetensors',
+                f'{stem}-*-of-*.safetensors',
+                f'{stem}.safetensors.index.json',
+            ]
+
+            commit = api.upload_folder(
+                repo_id=resolved_repo_id,
+                folder_path=temporary_directory,
+                commit_message=commit_message or 'Upload model',
+                commit_description=commit_description,
+                token=token,
+                repo_type='model',
+                revision=revision,
+                create_pr=create_pr,
+                delete_patterns=delete_patterns,
+            )
+
+        commit_url = getattr(commit, 'commit_url', commit)
+        return str(commit_url)
 
     @classmethod
     def from_pretrained(
@@ -181,7 +472,6 @@ class PretrainedModel(Module):
         not_found_some = False
 
         # 5. Load weights
-        import re
         import numpy as np
         from safetensors import safe_open
         from ..utils.quantization import (
@@ -395,6 +685,7 @@ class PretrainedModel(Module):
 
         # 6. Inject actual arrays into the PyTree skeleton
         state.load_flat_state_dict(new_state)
+        state.base_model_name_or_path = path_or_repo_str
         return state
     
 __all__ = ['PretrainedModel']
