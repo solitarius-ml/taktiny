@@ -22,10 +22,27 @@ import json
 class ModelConfig:
     def __init__(self, **kwargs):
         for k, v in kwargs.items():
+            if isinstance(v, dict):
+                v = ModelConfig(**v)
             setattr(self, k, v)
-            
+
     def __getattr__(self, name):
-        # Gracefully return None for missing config keys instead of crashing
+        # 1. Check nested text_config (common in HuggingFace multimodal models like Gemma 3/4, Qwen VL, Llama Vision)
+        text_cfg = self.__dict__.get('text_config', None)
+        if text_cfg is not None and text_cfg is not self:
+            val = getattr(text_cfg, name, None)
+            if val is not None:
+                return val
+
+        # 2. Check nested sub-configs (vision_config, encoder, decoder)
+        for sub_cfg_name in ('vision_config', 'encoder', 'decoder'):
+            sub_cfg = self.__dict__.get(sub_cfg_name, None)
+            if sub_cfg is not None and sub_cfg is not self:
+                val = getattr(sub_cfg, name, None)
+                if val is not None:
+                    return val
+
+        # 3. Gracefully return None for missing keys
         return None
 
     @classmethod

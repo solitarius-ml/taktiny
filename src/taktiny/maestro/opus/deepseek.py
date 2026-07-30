@@ -19,28 +19,83 @@ from taktiny.maestro._livret import repertoire
 from taktiny.cosettes._common import TransformerCausalLM
 
 
+from taktiny.cosettes.transformers.llama import LlamaDecoderLayer
+from taktiny import nn
+
+
 class Deepseek(TransformerCausalLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 class DeepseekV2(TransformerCausalLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
+
 
 class DeepseekV3(TransformerCausalLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
-    
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
+
 
 class DeepseekV3_2(TransformerCausalLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 class DeepseekV4(TransformerCausalLM):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        super().__init__(
+            config,
+            rngs=rngs,
+            decoder=LlamaDecoderLayer,
+            norm=nn.RMSNorm,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
 
 
 repertoire.register('DeepseekForCausalLM', Deepseek)

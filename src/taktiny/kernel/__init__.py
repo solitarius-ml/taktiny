@@ -11,3 +11,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""High-performance kernels for TakTiny (Attention, Megablox GMM, Ragged, Gather-Reduce)."""
+
+from taktiny.kernel import attention
+from taktiny.kernel import megablox
+from taktiny.kernel import ragged
+from taktiny.kernel import gather_reduce_pallas
+from taktiny.kernel import gather_reduce_sc
+from taktiny.kernel import sort_activations
+
+from taktiny.kernel.sort_activations import route, unroute
+from taktiny.kernel.gather_reduce_sc import sc_gather_reduce
+
+__all__ = [
+    "attention",
+    "megablox",
+    "ragged",
+    "gather_reduce_pallas",
+    "gather_reduce_sc",
+    "sort_activations",
+    "route",
+    "unroute",
+    "sc_gather_reduce",
+]

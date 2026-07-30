@@ -81,10 +81,18 @@ class TransformerDecoderLayer(nn.Module):
         num_heads = getattr(config, 'num_attention_heads', None)
         num_kv_heads = getattr(config, 'num_key_value_heads', None)
         max_position_embeddings = getattr(config, 'max_position_embeddings', None)
-        rope_parameters = getattr(config, 'rope_parameters', None) or {}
+        rope_parameters = getattr(config, 'rope_parameters', None)
+        if isinstance(rope_parameters, dict):
+            rope_theta_param = rope_parameters.get('rope_theta', None)
+        elif rope_parameters is not None:
+            rope_theta_param = getattr(rope_parameters, 'rope_theta', None)
+        else:
+            rope_theta_param = None
+
         rope_theta = (
             getattr(config, 'rope_theta', None)
-            or rope_parameters.get('rope_theta')
+            or rope_theta_param
+            or 10000.0
         )
         intermediate_size = getattr(config, 'intermediate_size', None)
 
@@ -463,15 +471,24 @@ class TransformerModel(nn.Module):
                 )
             )
         else:
-            def stacked_layers():
-                for layer_idx in range(num_hidden_layers):
-                    layer = module(config, rngs=rngs, layer_idx=layer_idx)
-                    layer.layer_idx = None
-                    yield layer
+            try:
+                def stacked_layers():
+                    for layer_idx in range(num_hidden_layers):
+                        layer = module(config, rngs=rngs, layer_idx=layer_idx)
+                        layer.layer_idx = None
+                        yield layer
 
-            self.layers = nn.SeqStack(
-                stacked_layers()
-            )
+                self.layers = nn.SeqStack(
+                    stacked_layers()
+                )
+            except Exception:
+                self.use_list = True
+                self.layers = nn.List(
+                    *(
+                        module(config, rngs=rngs, layer_idx=layer_idx)
+                        for layer_idx in range(num_hidden_layers)
+                    )
+                )
 
         self.norm = None
         if isinstance(norm, nn.Module):
@@ -509,7 +526,8 @@ class TransformerModel(nn.Module):
         is_causal: bool = False,
         out_sharding=None,
     ):
-        x = self.embed_tokens(x)
+        if not jnp.issubdtype(x.dtype, jnp.inexact):
+            x = self.embed_tokens(x)
 
         def call_layer(layer, hidden_states, layer_cache):
             return layer(
@@ -1359,26 +1377,356 @@ class TransformerCausalLM(PretrainedModel):
 
 
 class TransformerConditionalGeneration(PretrainedModel):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    """Unified base class for Multimodal Language Models (Conditional Generation).
 
+    Coordinates a text language backbone (e.g., ``TransformerCausalLM``), an optional
+    vision encoder/tower, an optional audio encoder/tower, and multimodal projectors.
+    Supports text generation conditioned on text, image, video, and audio inputs.
 
-class TransformerMM(PretrainedModel):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    Args:
+        config: Model configuration containing text, vision, and projector settings.
+        rngs: Random number generator for weight initialization.
+        language_model: Language model instance or module class.
+        decoder: Decoder layer module class used to build a ``TransformerCausalLM``
+            if ``language_model`` is not directly provided.
+        vision_tower: Vision encoder instance or module class.
+        multi_modal_projector: Multimodal projection layer instance or module class.
+        audio_tower: Audio encoder instance or module class.
+        audio_projector: Audio projection layer instance or module class.
+        image_token_id: Token ID representing image placeholders in ``input_ids``.
+        video_token_id: Token ID representing video placeholders in ``input_ids``.
+        audio_token_id: Token ID representing audio placeholders in ``input_ids``.
+        mesh: JAX device mesh for explicit sharding.
+        sharding_rules: Logical-to-mesh axis mapping rules.
+    """
+
+    default_sharding_rules = [
+        ('vocab', 'tp'),
+        ('embed', None),
+        ('heads', 'tp'),
+        ('kv_heads', 'tp'),
+        ('head_dim', None),
+        ('mlp', 'tp'),
+        ('batch', 'fsdp'),
+        ('sequence', None),
+    ]
+
+    def __init__(
+        self,
+        config: ModelConfig = None,
+        *,
+        rngs: nn.Rngs = None,
+        language_model = None,
+        decoder = None,
+        embedding = None,
+        norm = None,
+        lm_head = None,
+        vision_tower = None,
+        multi_modal_projector = None,
+        audio_tower = None,
+        audio_projector = None,
+        image_token_id: Optional[int] = None,
+        video_token_id: Optional[int] = None,
+        audio_token_id: Optional[int] = None,
+        mesh: jax.sharding.Mesh = None,
+        sharding_rules: Optional[List[Tuple]] = None,
+        **kwargs,
+    ):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+
+        self.config = config
+        self.dtype = (
+            getattr(config, 'torch_dtype', None)
+            or getattr(config, 'dtype', None)
+            or 'bfloat16'
+        )
+        self.shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
+
+        # 1. Text Language Model Backbone
+        if language_model is not None:
+            if isinstance(language_model, type) and issubclass(language_model, nn.Module):
+                self.language_model = language_model(
+                    config=config,
+                    rngs=rngs,
+                    decoder=decoder,
+                    embedding=embedding,
+                    norm=norm,
+                    lm_head=lm_head,
+                    mesh=mesh,
+                    sharding_rules=sharding_rules,
+                    **kwargs,
+                )
+            else:
+                self.language_model = language_model
+        elif decoder is not None:
+            self.language_model = TransformerCausalLM(
+                config=config,
+                rngs=rngs,
+                decoder=decoder,
+                embedding=embedding,
+                norm=norm,
+                lm_head=lm_head,
+                mesh=mesh,
+                sharding_rules=sharding_rules,
+                **kwargs,
+            )
+        else:
+            self.language_model = None
+
+        # 2. Vision Encoder / Tower
+        if isinstance(vision_tower, type) and issubclass(vision_tower, nn.Module):
+            self.vision_tower = vision_tower(config=config, rngs=rngs)
+        else:
+            self.vision_tower = vision_tower
+
+        # 3. Multimodal Vision Projector
+        if isinstance(multi_modal_projector, type) and issubclass(multi_modal_projector, nn.Module):
+            self.multi_modal_projector = multi_modal_projector(config=config, rngs=rngs)
+        else:
+            self.multi_modal_projector = multi_modal_projector
+
+        # 4. Audio Tower & Audio Projector
+        if isinstance(audio_tower, type) and issubclass(audio_tower, nn.Module):
+            self.audio_tower = audio_tower(config=config, rngs=rngs)
+        else:
+            self.audio_tower = audio_tower
+
+        if isinstance(audio_projector, type) and issubclass(audio_projector, nn.Module):
+            self.audio_projector = audio_projector(config=config, rngs=rngs)
+        else:
+            self.audio_projector = audio_projector
+
+        # 5. Media Token IDs
+        self.image_token_id = (
+            image_token_id
+            or getattr(config, 'image_token_id', None)
+            or getattr(getattr(config, 'vision_config', None), 'image_token_id', None)
+        )
+        self.video_token_id = video_token_id or getattr(config, 'video_token_id', None)
+        self.audio_token_id = audio_token_id or getattr(config, 'audio_token_id', None)
+
+    def get_input_embeddings(self):
+        if self.language_model is not None and hasattr(self.language_model, 'get_input_embeddings'):
+            return self.language_model.get_input_embeddings()
+        elif self.language_model is not None and hasattr(self.language_model, 'model'):
+            return self.language_model.model.embed_tokens
+        elif hasattr(self, 'embed_tokens'):
+            return self.embed_tokens
+        return None
+
+    def get_output_embeddings(self):
+        if self.language_model is not None and hasattr(self.language_model, 'get_output_embeddings'):
+            return self.language_model.get_output_embeddings()
+        elif self.language_model is not None and hasattr(self.language_model, 'lm_head'):
+            return self.language_model.lm_head
+        elif hasattr(self, 'lm_head'):
+            return self.lm_head
+        return None
+
+    def get_language_model(self):
+        return self.language_model
+
+    def get_vision_tower(self):
+        return self.vision_tower
+
+    def get_multi_modal_projector(self):
+        return self.multi_modal_projector
+
+    def enable_remat(self):
+        if self.language_model is not None and hasattr(self.language_model, 'enable_remat'):
+            self.language_model.enable_remat()
+        if self.vision_tower is not None and hasattr(self.vision_tower, 'enable_remat'):
+            self.vision_tower.enable_remat()
+
+    def encode_vision(self, pixel_values: jax.Array, **kwargs) -> jax.Array:
+        """Encode vision inputs and project features into hidden dimension."""
+        if self.vision_tower is None:
+            raise ValueError("vision_tower is not configured for this model")
+        vision_outputs = self.vision_tower(pixel_values, **kwargs)
+        if isinstance(vision_outputs, tuple):
+            vision_features = vision_outputs[0]
+        else:
+            vision_features = vision_outputs
+
+        if self.multi_modal_projector is not None:
+            vision_features = self.multi_modal_projector(vision_features)
+        return vision_features
+
+    def encode_audio(self, input_features: jax.Array, **kwargs) -> jax.Array:
+        """Encode audio inputs and project features into hidden dimension."""
+        if self.audio_tower is None:
+            raise ValueError("audio_tower is not configured for this model")
+        audio_outputs = self.audio_tower(input_features, **kwargs)
+        if isinstance(audio_outputs, tuple):
+            audio_features = audio_outputs[0]
+        else:
+            audio_features = audio_outputs
+
+        if self.audio_projector is not None:
+            audio_features = self.audio_projector(audio_features)
+        return audio_features
+
+    def merge_multimodal_embeddings(
+        self,
+        input_ids: jax.Array,
+        inputs_embeds: jax.Array,
+        multimodal_features: jax.Array,
+        media_token_id: int,
+    ) -> jax.Array:
+        """Merge/splice multimodal feature vectors into inputs_embeds at media_token_id positions."""
+        if media_token_id is None or multimodal_features is None:
+            return inputs_embeds
+
+        mask = (input_ids == media_token_id)
+        flat_features = multimodal_features.reshape(-1, multimodal_features.shape[-1])
+        target_shape = inputs_embeds.shape
+        reshaped_features = flat_features[:target_shape[0] * target_shape[1]].reshape(target_shape)
+        return jnp.where(mask[..., None], reshaped_features, inputs_embeds)
+
+    def __call__(
+        self,
+        input_ids: jax.Array = None,
+        pixel_values: jax.Array = None,
+        input_features: jax.Array = None,
+        pixel_attention_mask: jax.Array = None,
+        image_sizes: jax.Array = None,
+        inputs_embeds: jax.Array = None,
+        attention_mask: jax.Array = None,
+        ctx: TransformerContext = None,
+        logits_to_keep: int | jax.Array = 0,
+        image_token_id: int = None,
+        audio_token_id: int = None,
+        **kwargs,
+    ) -> tuple[jax.Array, TransformerContext | None]:
+        if inputs_embeds is None:
+            if input_ids is None:
+                raise ValueError("You must specify either input_ids or inputs_embeds")
+
+            embed_fn = self.get_input_embeddings()
+            if embed_fn is not None:
+                inputs_embeds = embed_fn(input_ids)
+            else:
+                inputs_embeds = input_ids
+
+            # Process vision features
+            if pixel_values is not None and self.vision_tower is not None:
+                vision_features = self.encode_vision(pixel_values, **kwargs)
+                img_tok_id = image_token_id or self.image_token_id
+                if img_tok_id is not None:
+                    inputs_embeds = self.merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, vision_features, img_tok_id
+                    )
+
+            # Process audio features
+            if input_features is not None and self.audio_tower is not None:
+                audio_features = self.encode_audio(input_features, **kwargs)
+                aud_tok_id = audio_token_id or self.audio_token_id
+                if aud_tok_id is not None:
+                    inputs_embeds = self.merge_multimodal_embeddings(
+                        input_ids, inputs_embeds, audio_features, aud_tok_id
+                    )
+
+        # Delegate to language model backbone
+        if self.language_model is not None:
+            return self.language_model(
+                inputs_embeds,
+                attention_mask=attention_mask,
+                ctx=ctx,
+                logits_to_keep=logits_to_keep,
+            )
+        elif hasattr(self, 'model'):
+            x, new_cache = self.model(
+                inputs_embeds,
+                attention_mask=attention_mask,
+                kv_cache=(ctx.key_cache, ctx.value_cache) if ctx and ctx.key_cache is not None else None,
+                position_idx=ctx.position_idx if ctx else None,
+                is_causal=ctx.is_causal if ctx else False,
+            )
+            out_embed = self.get_output_embeddings()
+            logits = out_embed(x) if out_embed is not None else x
+            if ctx is not None and new_cache is not None:
+                ctx = replace(ctx, key_cache=new_cache[0], value_cache=new_cache[1])
+            return logits, ctx
+        else:
+            raise NotImplementedError("Subclass must implement forward pass or provide language_model / model")
+
+    @classmethod
+    def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
+        if 'config' in kwargs:
+            config = kwargs.pop('config')
+        else:
+            config = ModelConfig.load_config(path_or_repo, local=local)
+
+        module_map = [
+            ("model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
+            ("language_model.model.embed_tokens.weight", "language_model.model.embed_tokens.embedding"),
+        ]
+
+        return cls._load_from_pretrained(
+            path_or_repo,
+            config,
+            module_map,
+            local=local,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
+            **kwargs,
+        )
+
+    def generate(
+        self,
+        input_ids: jax.Array,
+        max_new_tokens: int = 20,
+        pixel_values: jax.Array = None,
+        input_features: jax.Array = None,
+        attention_mask: jax.Array = None,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 1.0,
+        repetition_penalty: float = 1.0,
+        eos_token_id: int | list[int] | tuple[int, ...] = None,
+        pad_token_id: int = None,
+        seed: int = 42,
+    ) -> jax.Array:
+        """Autoregressively generate tokens conditioned on text and optional multimodal inputs."""
+        if self.language_model is not None and hasattr(self.language_model, 'generate'):
+            if pixel_values is not None or input_features is not None:
+                logits, ctx = self(
+                    input_ids=input_ids,
+                    pixel_values=pixel_values,
+                    input_features=input_features,
+                    attention_mask=attention_mask,
+                )
+            return self.language_model.generate(
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                attention_mask=attention_mask,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
+                seed=seed,
+            )
+        else:
+            raise NotImplementedError("Generation requires a configured language_model")
 
 
 class DiffusionIM(PretrainedModel):
-    def __init__(
-        self,
-        **kwargs
-    ):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    """Base class for Diffusion Image Models (e.g., Flux, DiT, Stable Diffusion)."""
+    def __init__(self, config=None, *, rngs: nn.Rngs = None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        self.config = config
 
 
 class DiffusionLM(PretrainedModel):
-    def __init__(self):
-        raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
+    """Base class for Diffusion Language Models (e.g., Diffusion Gemma, Discrete Diffusion LM)."""
+    def __init__(self, config=None, *, rngs: nn.Rngs = None, **kwargs):
+        if rngs is None:
+            rngs = nn.Rngs(42)
+        self.config = config
 
 
 __all__ = [
@@ -1387,7 +1735,6 @@ __all__ = [
     'TransformerModel',
     'TransformerCausalLM',
     'TransformerConditionalGeneration',
-    'TransformerMM',
     'DiffusionLM',
     'DiffusionIM',
 ]
