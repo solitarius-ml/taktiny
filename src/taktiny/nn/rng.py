@@ -36,6 +36,11 @@ class Rngs:
         self._key, _k = jax.random.split(self._key, 2)
         return _k
 
+    @property
+    def key(self):
+        """Return the current key without advancing the stream."""
+        return self._key
+
     def tree_flatten(self):
         return ((self._key,), None)
 
