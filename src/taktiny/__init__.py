@@ -25,6 +25,14 @@ from taktiny.maestro._config import ModelConfig
 from taktiny.takt import Takt
 from taktiny import nn, peft
 from taktiny import transforms as tt
+from taktiny.trainer import (
+    DatasetConfig,
+    TensorBoardCallback,
+    Trainer,
+    TrainerCallback,
+    TrainingConfig,
+    WandbCallback,
+)
 
 from taktiny.maestro.opus import *
 
@@ -35,6 +43,9 @@ __all__ = [
     'LoraConfig',
     'ModelConfig',
     'Trainer',
+    'TrainerCallback',
+    'TensorBoardCallback',
+    'WandbCallback',
     'TrainingConfig',
     'DatasetConfig',
     'tt',

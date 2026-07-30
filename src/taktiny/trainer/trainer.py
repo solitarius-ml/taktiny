@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections import deque
 from itertools import islice
 import json
@@ -227,11 +228,39 @@ def _format_iteration_time(seconds):
 
 
 class Trainer:
-    def __init__(self, model, loss_fn, training_config: TrainingConfig, dataset_config: DatasetConfig):
+    def __init__(
+        self,
+        model,
+        loss_fn,
+        training_config: TrainingConfig,
+        dataset_config: DatasetConfig,
+        *,
+        callbacks=None,
+        compute_metrics=None,
+    ):
         self.model = model
         self.loss_fn = loss_fn
         self.training_config = training_config
         self.dataset_config = dataset_config
+        self.compute_metrics = compute_metrics
+        if compute_metrics is not None and not callable(compute_metrics):
+            raise TypeError('compute_metrics must be callable or None')
+        if callbacks is None:
+            self.callbacks = []
+        elif any(
+            callable(getattr(callbacks, event, None))
+            for event in (
+                'on_step_end',
+                'on_log',
+                'on_save',
+                'on_evaluate',
+            )
+        ):
+            self.callbacks = [callbacks]
+        else:
+            self.callbacks = list(callbacks)
+        for callback in self.callbacks:
+            self._validate_callback(callback)
         self.model_type = self._diagnose_model_type(model)
         self._mesh = None
         self.global_step = 0
@@ -247,6 +276,40 @@ class Trainer:
         self.micro_step = 0
         self.last_grad_norm = None
         self.last_update_skipped = False
+
+    def add_callback(self, callback):
+        """Append a callback and return it."""
+        self._validate_callback(callback)
+        self.callbacks.append(callback)
+        return callback
+
+    def remove_callback(self, callback):
+        """Remove a previously registered callback."""
+        self.callbacks.remove(callback)
+
+    def _call_event(self, event, **kwargs):
+        for callback in tuple(self.callbacks):
+            method = getattr(callback, event, None)
+            if callable(method):
+                method(self, **kwargs)
+
+    @staticmethod
+    def _validate_callback(callback):
+        events = (
+            'on_train_begin',
+            'on_step_end',
+            'on_log',
+            'on_save',
+            'on_evaluate',
+            'on_train_end',
+        )
+        if not any(
+            callable(getattr(callback, event, None))
+            for event in events
+        ):
+            raise TypeError(
+                'Each callback must implement at least one Trainer event'
+            )
 
     def _initial_loss_scale(self):
         loss_scale = self.training_config.loss_scale
@@ -350,6 +413,8 @@ class Trainer:
             )
 
         losses = []
+        metric_values = {}
+        expected_metric_names = None
         batches = _prefetch(
             dataloader,
             self._place_batch,
@@ -376,15 +441,54 @@ class Trainer:
             if isinstance(value, jax.Array):
                 value = value.item()
             losses.append(float(value))
+            if self.compute_metrics is not None:
+                batch_metrics = self.compute_metrics(params, batch)
+                if not isinstance(batch_metrics, Mapping):
+                    raise TypeError(
+                        'compute_metrics must return a mapping'
+                    )
+                batch_metric_names = set(batch_metrics)
+                if expected_metric_names is None:
+                    expected_metric_names = batch_metric_names
+                elif batch_metric_names != expected_metric_names:
+                    raise ValueError(
+                        'compute_metrics must return the same metric names '
+                        'for every validation batch'
+                    )
+                for name, metric_value in batch_metrics.items():
+                    if not isinstance(name, str) or not name:
+                        raise TypeError(
+                            'Custom metric names must be non-empty strings'
+                        )
+                    metric_name = (
+                        name if name.startswith('eval_') else f'eval_{name}'
+                    )
+                    if metric_name == 'eval_loss':
+                        raise ValueError(
+                            'compute_metrics cannot replace eval_loss'
+                        )
+                    metric_array = jnp.asarray(metric_value)
+                    if metric_array.ndim != 0:
+                        raise ValueError(
+                            f'Custom metric {name!r} must be scalar'
+                        )
+                    metric_values.setdefault(metric_name, []).append(
+                        float(jax.device_get(metric_array))
+                    )
         batches.close()
 
         if not losses:
             raise ValueError(
                 'validation_dataloader produced no evaluation batches'
             )
-        return {
+        metrics = {
             'eval_loss': sum(losses) / len(losses),
         }
+        metrics.update({
+            name: sum(values) / len(values)
+            for name, values in metric_values.items()
+        })
+        return metrics
 
     def evaluate(self):
         """Evaluate the current model using ``validation_dataloader``."""
@@ -393,7 +497,15 @@ class Trainer:
         batch_mesh = _sharding_mesh(self.dataset_config.batch_sharding)
         _validate_parameter_placement(params, batch_mesh)
         self._mesh = parameter_mesh or batch_mesh
-        return self._evaluate_params(params)
+        metrics = self._evaluate_params(params)
+        record = {
+            'step': self.global_step,
+            **metrics,
+        }
+        self.log_history.append(record)
+        self._call_event('on_log', logs=dict(record))
+        self._call_event('on_evaluate', metrics=dict(record))
+        return metrics
 
     def _record_evaluation(self, params, *, step, epoch):
         metrics = self._evaluate_params(params)
@@ -427,6 +539,8 @@ class Trainer:
             self.best_metric = metric
             self._best_step = step
             self.best_model_checkpoint = None
+        self._call_event('on_log', logs=dict(record))
+        self._call_event('on_evaluate', metrics=dict(record))
         return metrics, is_best
 
     def _checkpoint_directory(self, step):
@@ -688,6 +802,10 @@ class Trainer:
 
         self.saved_checkpoints.append(checkpoint_path)
         self._rotate_checkpoints()
+        self._call_event(
+            'on_save',
+            checkpoint_path=checkpoint_path,
+        )
         return checkpoint_path
 
     def _ensure_checkpoint(
@@ -813,7 +931,9 @@ class Trainer:
             )
         if saving_enabled:
             os.makedirs(self.training_config.output_dir, exist_ok=True)
-        
+
+        self._call_event('on_train_begin')
+
         # 1. Initialize Optimizer
         if self.training_config.remat:
             enable_remat = getattr(self.model, 'enable_remat', None)
@@ -1104,6 +1224,20 @@ class Trainer:
                 grad_norm = self.last_grad_norm
                 steps_run_this_call += 1
                 steps_since_log += 1
+                learning_rate = self._learning_rate_at_step(step)
+                step_logs = {
+                    'step': step,
+                    'epoch': current_epoch,
+                    'loss': loss,
+                    'learning_rate': learning_rate,
+                    'grad_norm': grad_norm,
+                    'loss_scale': self.loss_scale,
+                    'skipped_update': update_skipped,
+                }
+                self._call_event(
+                    'on_step_end',
+                    logs=dict(step_logs),
+                )
                 progress.update(
                     task_id,
                     advance=1,
@@ -1120,17 +1254,12 @@ class Trainer:
                     iteration_time = _format_iteration_time(
                         seconds_per_step
                     )
-                    learning_rate = self._learning_rate_at_step(step)
-                    self.log_history.append({
-                        'step': step,
-                        'epoch': current_epoch,
-                        'loss': loss,
+                    record = {
+                        **step_logs,
                         'seconds_per_step': seconds_per_step,
-                        'learning_rate': learning_rate,
-                        'grad_norm': grad_norm,
-                        'loss_scale': self.loss_scale,
-                        'skipped_update': update_skipped,
-                    })
+                    }
+                    self.log_history.append(record)
+                    self._call_event('on_log', logs=dict(record))
                     loss_text = (
                         f'{loss:<7.4f}'
                         if loss is not None
@@ -1361,6 +1490,10 @@ class Trainer:
                     'loss_scale': self.loss_scale,
                     'skipped_update': update_skipped,
                 })
+                self._call_event(
+                    'on_log',
+                    logs=dict(self.log_history[-1]),
+                )
                 loss_text = (
                     f'{loss:<7.4f}' if loss is not None else 'non-finite'
                 )
@@ -1428,6 +1561,7 @@ class Trainer:
                 f'[dim]Loaded best checkpoint from '
                 f'{self.best_model_checkpoint}[/dim]'
             )
+        self._call_event('on_train_end')
         console.print("[bold green]✨ Training complete![/bold green]")
         
     def _inject_params(self, params):

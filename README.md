@@ -312,6 +312,31 @@ trainer = Trainer(
 trainer.train()
 ```
 
+Callbacks and validation metrics can be added without changing the training
+step:
+
+```python
+from taktiny import TensorBoardCallback, WandbCallback
+
+trainer = Trainer(
+    model=model,
+    loss_fn=loss_fn,
+    training_config=training_config,
+    dataset_config=dataset_config,
+    compute_metrics=lambda params, batch: {
+        'accuracy': accuracy(params, batch),
+    },
+    callbacks=[
+        TensorBoardCallback(log_dir='runs/experiment'),
+        WandbCallback(project='taktiny'),
+    ],
+)
+```
+
+Callback objects may implement any of `on_step_end`, `on_log`, `on_save`, or
+`on_evaluate`. TensorBoard and W&B dependencies remain optional and are
+available through the `tensorboard`, `wandb`, or `reporting` package extras.
+
 The trainer currently uses heuristic parameter freezing for large and
 quantized parameters. Review the trainable parameter set before using it for a
 real training run.
