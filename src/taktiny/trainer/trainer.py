@@ -159,7 +159,7 @@ def _validate_parameter_placement(params, batch_mesh):
 
 
 def _place_trainable_params(tree, mesh):
-    if mesh is None or mesh.size <= 1:
+    if mesh is None:
         return tree
 
     replicated = jax.sharding.NamedSharding(
@@ -1523,6 +1523,10 @@ class Trainer:
 
         trainable_params = _place_trainable_params(
             trainable_params,
+            self._mesh,
+        )
+        frozen_params = _place_trainable_params(
+            frozen_params,
             self._mesh,
         )
         if self.model_type == 'taktiny':

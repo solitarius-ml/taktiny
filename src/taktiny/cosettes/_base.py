@@ -915,6 +915,7 @@ class PretrainedModel(Module):
         from ..utils.weights import map_state_dict
 
         cpu_device = jax.devices('cpu')[0]
+        default_device = jax.devices()[0]
 
         def parameter_sharding(
             parameter,
@@ -939,6 +940,8 @@ class PretrainedModel(Module):
                     axis_names,
                     rules=sharding_rules,
                 )
+            if sharding is None and mesh is None:
+                sharding = default_device
             return sharding
 
         def place_qarray(value, parameter):

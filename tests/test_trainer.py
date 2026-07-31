@@ -1816,6 +1816,17 @@ def test_trainable_placement_preserves_existing_named_sharding():
     assert placed['weight'] is value
 
 
+def test_parameter_placement_uses_single_device_mesh():
+    devices = np.asarray([jax.devices()[0]])
+    mesh = Mesh(devices, ('data',))
+    value = jnp.asarray(np.ones((1,), dtype=np.float32))
+
+    placed = _place_trainable_params({'weight': value}, mesh)
+
+    assert isinstance(placed['weight'].sharding, NamedSharding)
+    assert placed['weight'].sharding.mesh == mesh
+
+
 @pytest.mark.parametrize(
     'factory',
     [
