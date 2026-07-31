@@ -323,7 +323,7 @@ class Attention(nn.Module):
         if scale is None:
             scale = 1.0 / math.sqrt(head_dim)
         if interpret is None:
-            interpret = jax.default_backend() != 'tpu'
+            interpret = jax.default_backend() == 'cpu'
         block_size = math.gcd(
             key_length,
             min(block_size, key_length),
