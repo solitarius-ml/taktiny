@@ -27,6 +27,9 @@ class FakeTokenizer:
     padding_side = 'right'
     truncation_side = 'right'
 
+    def __init__(self):
+        self.tokenization_batch_sizes = []
+
     @staticmethod
     def _content_ids(text):
         return [3 + ord(character) % 23 for character in text]
@@ -40,6 +43,19 @@ class FakeTokenizer:
         max_length=None,
         **kwargs,
     ):
+        if isinstance(text, (list, tuple)):
+            self.tokenization_batch_sizes.append(len(text))
+            return {
+                'input_ids': [
+                    self(
+                        item,
+                        add_special_tokens=add_special_tokens,
+                        truncation=truncation,
+                        max_length=max_length,
+                    )['input_ids']
+                    for item in text
+                ]
+            }
         ids = self._content_ids(text)
         if add_special_tokens:
             ids = [self.bos_token_id] + ids
@@ -347,6 +363,8 @@ def test_packing_builds_block_diagonal_attention_and_boundary_labels():
         shuffle=False,
     )
 
+    assert len(loader) == 1
+
     batch = next(iter(loader))
     mask = batch['attention_mask'][0, 0]
 
@@ -356,6 +374,48 @@ def test_packing_builds_block_diagonal_attention_and_boundary_labels():
     assert not mask[4, 1]
     assert batch['labels'][0, 0] == -100
     assert batch['labels'][0, 3] == -100
+
+
+def test_finite_text_loader_tokenizes_column_and_reports_packed_length():
+    class TextColumnDataset:
+        column_names = ['text']
+
+        def __init__(self, texts):
+            self.texts = texts
+            self.column_reads = 0
+
+        def __len__(self):
+            return len(self.texts)
+
+        def __getitem__(self, key):
+            if key == 'text':
+                self.column_reads += 1
+                return self.texts
+            return {'text': self.texts[key]}
+
+    tokenizer = FakeTokenizer()
+    source = TextColumnDataset(['abc'] * 10)
+    config = SFTDatasetConfig(
+        dataloader=source,
+        tokenizer=tokenizer,
+        shuffle=False,
+        drop_remainder=False,
+        batch_size=1,
+        max_length=10,
+        packing=True,
+        padding='max_length',
+    )
+    loader = _SFTDataLoader(
+        config.dataloader,
+        config,
+        SFTTrainingConfig(),
+        streaming=False,
+        shuffle=False,
+    )
+
+    assert source.column_reads == 1
+    assert tokenizer.tokenization_batch_sizes == [10]
+    assert len(loader) == len(list(loader)) == 5
 
 
 def test_sft_grain_iterator_state_restores_next_batch():

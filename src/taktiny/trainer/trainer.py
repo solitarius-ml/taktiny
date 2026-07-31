@@ -1691,14 +1691,29 @@ class Trainer:
         if self.training_config.max_steps is not None:
             total_steps = self.training_config.max_steps
 
-        with Progress(
+        progress_columns = [
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            TextColumn("• [bold magenta]Loss: {task.fields[loss]:.4f}[/bold magenta]"),
-            console=console
+        ]
+        if total_steps is not None:
+            progress_columns.append(
+                TextColumn(
+                    "[progress.percentage]{task.percentage:>3.0f}%"
+                )
+            )
+        progress_columns.append(TimeElapsedColumn())
+        if total_steps is not None:
+            progress_columns.append(TimeRemainingColumn())
+        progress_columns.append(
+            TextColumn(
+                "• [bold magenta]Loss: {task.fields[loss]:.4f}"
+                "[/bold magenta]"
+            )
+        )
+
+        with Progress(
+            *progress_columns,
+            console=console,
         ) as progress:
 
             task_id = progress.add_task(
