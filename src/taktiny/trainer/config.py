@@ -30,7 +30,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     log_interval: int = 10
     seed: int = 42
-    jit_compile: bool = False
+    jit_compile: bool = True
     donate_batch: bool = False
     output_dir: str | PathLike | None = None
     save_steps: Optional[int] = None
@@ -189,6 +189,7 @@ class DatasetConfig:
     # When supplied, all repo-loading options below are ignored.
     dataloader: Optional[Iterable[Any]] = None
     validation_dataloader: Optional[Iterable[Any]] = None
+    batch_size: int = 1
     repo_id: Optional[str] = None
     process_fn: Optional[Callable] = None
     streaming: bool = False
@@ -272,7 +273,6 @@ class SFTDatasetConfig(DatasetConfig):
     """
 
     tokenizer: Any = field(default=None, repr=False)
-    batch_size: int = 1
     max_length: Optional[int] = 1024
     padding: str = 'longest'
     pad_to_multiple_of: Optional[int] = None

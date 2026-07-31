@@ -45,6 +45,11 @@ class ModelConfig:
         # 3. Gracefully return None for missing keys
         return None
 
+    def get(self, key, default=None):
+        """Return a configuration value using mapping-style semantics."""
+        value = getattr(self, key, None)
+        return default if value is None else value
+
     @classmethod
     def load_config(cls, path_or_repo, filename='config.json', subfolder=None, local=False):
         if local:

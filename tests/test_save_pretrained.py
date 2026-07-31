@@ -64,6 +64,7 @@ class TinyLoadableModel(PretrainedModel):
             config.hidden_size,
             bias=False,
             dtype=config.torch_dtype,
+            quant=getattr(config, 'quant', None),
             rngs=rngs,
         )
 
@@ -338,6 +339,38 @@ def test_from_pretrained_recognizes_native_qwix_checkpoint(tmp_path):
     np.testing.assert_array_equal(
         restored.proj.weight.value.qvalue,
         source.proj.weight.value.qvalue,
+    )
+
+
+def test_from_pretrained_places_ptq_weights_on_default_device(tmp_path):
+    save_file(
+        {
+            'proj.weight': np.arange(
+                16,
+                dtype=np.float32,
+            ).reshape(4, 4),
+        },
+        tmp_path / 'model.safetensors',
+    )
+    config = ModelConfig(
+        architectures=['TinyLoadableModel'],
+        hidden_size=4,
+        torch_dtype='bfloat16',
+    )
+
+    restored = TinyLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+        dtype='int4',
+    )
+
+    weight = restored.proj.weight.value
+    assert isinstance(weight, qwix.QArray)
+    assert weight.qtype == 'int4'
+    assert all(
+        jax.devices()[0] in component.devices()
+        for component in jax.tree.leaves(weight)
     )
 
 

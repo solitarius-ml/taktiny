@@ -337,7 +337,7 @@ loss, tokenization, dynamic padding, and optional sequence packing:
 ```python
 from transformers import AutoTokenizer
 
-from taktiny import SFTDatasetConfig, SFTTrainer, SFTTrainerConfig
+from taktiny import SFTDatasetConfig, SFTTrainer, SFTTrainingConfig
 
 tokenizer = AutoTokenizer.from_pretrained(model_repo)
 if tokenizer.pad_token_id is None:
@@ -345,7 +345,7 @@ if tokenizer.pad_token_id is None:
 
 trainer = SFTTrainer(
     model,
-    training_config=SFTTrainerConfig(
+    training_config=SFTTrainingConfig(
         epochs=1,
         learning_rate=2e-4,
         assistant_only_loss=True,

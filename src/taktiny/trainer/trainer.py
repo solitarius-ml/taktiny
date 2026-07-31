@@ -159,7 +159,7 @@ def _validate_parameter_placement(params, batch_mesh):
 
 
 def _place_trainable_params(tree, mesh):
-    if mesh is None or mesh.size <= 1:
+    if mesh is None:
         return tree
 
     replicated = jax.sharding.NamedSharding(
@@ -1525,6 +1525,10 @@ class Trainer:
             trainable_params,
             self._mesh,
         )
+        frozen_params = _place_trainable_params(
+            frozen_params,
+            self._mesh,
+        )
         if self.model_type == 'taktiny':
             self._inject_params(
                 _combine_params(trainable_params, frozen_params)
@@ -1687,14 +1691,29 @@ class Trainer:
         if self.training_config.max_steps is not None:
             total_steps = self.training_config.max_steps
 
-        with Progress(
+        progress_columns = [
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            TextColumn("• [bold magenta]Loss: {task.fields[loss]:.4f}[/bold magenta]"),
-            console=console
+        ]
+        if total_steps is not None:
+            progress_columns.append(
+                TextColumn(
+                    "[progress.percentage]{task.percentage:>3.0f}%"
+                )
+            )
+        progress_columns.append(TimeElapsedColumn())
+        if total_steps is not None:
+            progress_columns.append(TimeRemainingColumn())
+        progress_columns.append(
+            TextColumn(
+                "• [bold magenta]Loss: {task.fields[loss]:.4f}"
+                "[/bold magenta]"
+            )
+        )
+
+        with Progress(
+            *progress_columns,
+            console=console,
         ) as progress:
 
             task_id = progress.add_task(
@@ -1779,7 +1798,7 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(opt_state),
                             ),
-                            donate_argnums=(0, 1, 2),
+                            donate_argnums=(0, 1),
                         )
                     update_fn = (
                         compiled_optimizer_step or optimizer_step

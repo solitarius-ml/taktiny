@@ -29,12 +29,17 @@ from taktiny.cosettes._common import TransformerContext
 from taktiny.trainer.config import (
     SFTDatasetConfig,
     SFTTrainingConfig,
+    TrainingConfig,
+    DatasetConfig
 )
 from taktiny.trainer.trainer import (
     Trainer,
     _GrainEpochLoader,
     _load_dataset_splits,
 )
+
+
+_STREAM_TOKENIZATION_BUFFER_SIZE = 256
 
 
 def _as_token_list(value, name):
@@ -63,6 +68,33 @@ def _tokenizer_ids(tokenizer, text, *, max_length, add_special_tokens):
         kwargs['max_length'] = max_length
     encoded = tokenizer(text, **kwargs)
     return _as_token_list(encoded['input_ids'], 'input_ids')
+
+
+def _tokenizer_batch_ids(
+    tokenizer,
+    texts,
+    *,
+    max_length,
+    add_special_tokens,
+):
+    kwargs = {
+        'add_special_tokens': add_special_tokens,
+        'padding': False,
+        'return_attention_mask': False,
+        'truncation': max_length is not None,
+    }
+    if max_length is not None:
+        kwargs['max_length'] = max_length
+    encoded = tokenizer(texts, **kwargs)
+    values = encoded['input_ids']
+    if len(values) != len(texts):
+        raise ValueError(
+            'batched tokenizer returned a different number of sequences'
+        )
+    return [
+        _as_token_list(value, 'input_ids')
+        for value in values
+    ]
 
 
 def _common_prefix_length(left, right):
@@ -385,6 +417,10 @@ def _encode_sft_record(row, config, trainer_config):
             'prompt and completion fields'
         )
 
+    return _finalize_sft_record(ids, labels, config, trainer_config)
+
+
+def _finalize_sft_record(ids, labels, config, trainer_config):
     ids, labels = _append_eos(
         ids,
         labels,
@@ -403,6 +439,161 @@ def _encode_sft_record(row, config, trainer_config):
         'input_ids': ids,
         'labels': labels,
     }
+
+
+def _encode_sft_records(rows, config, trainer_config):
+    """Encode a bounded row batch while preserving input order."""
+    normalized = []
+    for row in rows:
+        if config.formatting_fn is not None:
+            row = config.formatting_fn(row)
+        if isinstance(row, str):
+            row = {config.dataset_text_field: row}
+        if not isinstance(row, Mapping):
+            raise TypeError(
+                'Each SFT record must be a mapping or formatting_fn must '
+                'return a mapping or string'
+            )
+        normalized.append(row)
+
+    encoded = [None] * len(normalized)
+    text_indices = [
+        index
+        for index, row in enumerate(normalized)
+        if (
+            'input_ids' not in row
+            and config.prompt_field not in row
+            and config.messages_field not in row
+            and config.dataset_text_field in row
+        )
+    ]
+    if text_indices:
+        if trainer_config.completion_only_loss:
+            raise ValueError(
+                'completion_only_loss=True requires prompt-completion records'
+            )
+        if trainer_config.assistant_only_loss:
+            raise ValueError(
+                'assistant_only_loss=True requires conversational records'
+            )
+        texts = []
+        for index in text_indices:
+            text = normalized[index][config.dataset_text_field]
+            if not isinstance(text, str):
+                raise TypeError(
+                    f'{config.dataset_text_field!r} must contain strings'
+                )
+            texts.append(text)
+        text_records = _encode_text_values(texts, config, trainer_config)
+        for index, record in zip(text_indices, text_records):
+            encoded[index] = record
+
+    text_index_set = set(text_indices)
+    for index, row in enumerate(normalized):
+        if encoded[index] is not None or index in text_index_set:
+            continue
+        encoded[index] = _encode_sft_record(
+            row,
+            replace(config, formatting_fn=None),
+            trainer_config,
+        )
+    return [record for record in encoded if record is not None]
+
+
+def _encode_text_values(texts, config, trainer_config):
+    if trainer_config.completion_only_loss:
+        raise ValueError(
+            'completion_only_loss=True requires prompt-completion records'
+        )
+    if trainer_config.assistant_only_loss:
+        raise ValueError(
+            'assistant_only_loss=True requires conversational records'
+        )
+    if not all(isinstance(text, str) for text in texts):
+        raise TypeError(
+            f'{config.dataset_text_field!r} must contain strings'
+        )
+    token_batches = _tokenizer_batch_ids(
+        config.tokenizer,
+        texts,
+        max_length=config.max_length,
+        add_special_tokens=True,
+    )
+    return [
+        _finalize_sft_record(
+            ids,
+            list(ids),
+            config,
+            trainer_config,
+        )
+        for ids in token_batches
+    ]
+
+
+def _pack_sft_records(records, config, trainer_config):
+    packed = []
+    packed_ids = []
+    packed_labels = []
+    packed_segments = []
+    segment = 0
+
+    def finish_pack():
+        nonlocal packed_ids, packed_labels, packed_segments, segment
+        if packed_ids:
+            packed.append({
+                'input_ids': packed_ids,
+                'labels': packed_labels,
+                'segment_ids': packed_segments,
+            })
+        packed_ids = []
+        packed_labels = []
+        packed_segments = []
+        segment = 0
+
+    for record in records:
+        offset = 0
+        while offset < len(record['input_ids']):
+            available = config.max_length - len(packed_ids)
+            take = min(available, len(record['input_ids']) - offset)
+            ids = record['input_ids'][offset:offset + take]
+            labels = list(record['labels'][offset:offset + take])
+            labels[0] = trainer_config.ignore_index
+            packed_ids.extend(ids)
+            packed_labels.extend(labels)
+            packed_segments.extend([segment] * take)
+            offset += take
+            segment += 1
+            if len(packed_ids) == config.max_length:
+                finish_pack()
+
+    finish_pack()
+    return packed
+
+
+class _CachedEpochIterator:
+    def __init__(self, records, *, shuffle, seed):
+        self.records = records
+        indices = np.arange(len(records))
+        if shuffle:
+            indices = np.random.default_rng(seed).permutation(indices)
+        self.indices = indices
+        self.position = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.position >= len(self.indices):
+            raise StopIteration
+        index = int(self.indices[self.position])
+        self.position += 1
+        return self.records[index]
+
+    def get_state(self):
+        return self.position.to_bytes(8, byteorder='little')
+
+    def set_state(self, state):
+        self.position = int.from_bytes(state, byteorder='little')
 
 
 def _round_up(value, multiple):
@@ -485,10 +676,21 @@ def _collate_sft_records(records, config, trainer_config):
 
 
 class _SFTBatchIterator:
-    def __init__(self, iterator, config, trainer_config):
+    def __init__(
+        self,
+        iterator,
+        config,
+        trainer_config,
+        *,
+        prepared=False,
+        prepacked=False,
+    ):
         self.iterator = iterator
         self.config = config
         self.trainer_config = trainer_config
+        self.prepared = prepared
+        self.prepacked = prepacked
+        self.encoded_records = []
         self.pending_fragment = None
         self.exhausted = False
 
@@ -496,15 +698,24 @@ class _SFTBatchIterator:
         return self
 
     def _next_record(self):
+        if self.prepared:
+            return next(self.iterator)
         while True:
-            row = next(self.iterator)
-            record = _encode_sft_record(
-                row,
+            if self.encoded_records:
+                return self.encoded_records.pop(0)
+            rows = []
+            while len(rows) < _STREAM_TOKENIZATION_BUFFER_SIZE:
+                try:
+                    rows.append(next(self.iterator))
+                except StopIteration:
+                    break
+            if not rows:
+                raise StopIteration
+            self.encoded_records.extend(_encode_sft_records(
+                rows,
                 self.config,
                 self.trainer_config,
-            )
-            if record is not None:
-                return record
+            ))
 
     @staticmethod
     def _slice_record(record, start, stop):
@@ -564,7 +775,7 @@ class _SFTBatchIterator:
             try:
                 record = (
                     self._next_pack()
-                    if self.config.packing
+                    if self.config.packing and not self.prepacked
                     else self._next_record()
                 )
             except StopIteration:
@@ -589,6 +800,7 @@ class _StatefulSFTBatchIterator(_SFTBatchIterator):
     def get_state(self):
         return pickle.dumps({
             'iterator': self.iterator.get_state(),
+            'encoded_records': self.encoded_records,
             'pending_fragment': self.pending_fragment,
             'exhausted': self.exhausted,
         })
@@ -596,6 +808,7 @@ class _StatefulSFTBatchIterator(_SFTBatchIterator):
     def set_state(self, state):
         state = pickle.loads(state)
         self.iterator.set_state(state['iterator'])
+        self.encoded_records = state.get('encoded_records', [])
         self.pending_fragment = state['pending_fragment']
         self.exhausted = state['exhausted']
 
@@ -616,28 +829,87 @@ class _SFTDataLoader:
         self.streaming = streaming
         self.shuffle = shuffle
         self.epoch = 0
+        self.prepared_records = None
+        if not streaming:
+            self.prepared_records = self._prepare_records()
+
+    def _prepare_records(self):
+        column_names = getattr(self.source, 'column_names', ())
+        text_field = self.config.dataset_text_field
+        row_priority_fields = {
+            'input_ids',
+            self.config.prompt_field,
+            self.config.messages_field,
+        }
+        if (
+            self.config.formatting_fn is None
+            and text_field in column_names
+            and not row_priority_fields.intersection(column_names)
+        ):
+            texts = self.source[text_field]
+            process_count = jax.process_count()
+            process_index = jax.process_index()
+            if process_count > 1:
+                texts = [
+                    texts[index]
+                    for index in range(
+                        process_index,
+                        len(texts),
+                        process_count,
+                    )
+                ]
+            records = _encode_text_values(
+                texts,
+                self.config,
+                self.trainer_config,
+            )
+            records = [record for record in records if record is not None]
+            if self.config.packing:
+                return _pack_sft_records(
+                    records,
+                    self.config,
+                    self.trainer_config,
+                )
+            return records
+
+        source = _GrainEpochLoader(
+            self.source,
+            shuffle=False,
+            seed=self.config.seed,
+        )
+        rows = list(source)
+        records = _encode_sft_records(
+            rows,
+            self.config,
+            self.trainer_config,
+        )
+
+        if self.config.packing:
+            return _pack_sft_records(
+                records,
+                self.config,
+                self.trainer_config,
+            )
+        return records
 
     def set_epoch(self, epoch):
         self.epoch = epoch
 
     def __len__(self):
-        source_size = len(self.source)
-        process_count = jax.process_count()
-        process_index = jax.process_index()
-        local_size = max(
-            0,
-            (
-                source_size
-                + process_count
-                - 1
-                - process_index
-            ) // process_count,
-        )
+        if self.prepared_records is None:
+            raise TypeError('streaming dataloader length is unknown')
+        local_size = len(self.prepared_records)
         if self.config.drop_remainder:
             return local_size // self.config.batch_size
         return math.ceil(local_size / self.config.batch_size)
 
     def _source_iterator(self):
+        if self.prepared_records is not None:
+            return _CachedEpochIterator(
+                self.prepared_records,
+                shuffle=self.shuffle,
+                seed=self.config.seed + self.epoch,
+            )
         if not self.streaming:
             loader = _GrainEpochLoader(
                 self.source,
@@ -673,6 +945,11 @@ class _SFTDataLoader:
             iterator,
             self.config,
             self.trainer_config,
+            prepared=self.prepared_records is not None,
+            prepacked=(
+                self.prepared_records is not None
+                and self.config.packing
+            ),
         )
 
 
@@ -736,18 +1013,18 @@ class SFTTrainer(Trainer):
     def __init__(
         self,
         model,
-        training_config: SFTTrainerConfig,
+        training_config: SFTTrainingConfig,
         dataset_config: SFTDatasetConfig,
         *,
         loss_fn=None,
         callbacks=None,
         compute_metrics=None,
     ):
-        if not isinstance(training_config, SFTTrainerConfig):
+        if not isinstance(training_config, TrainingConfig):
             raise TypeError(
-                'training_config must be an SFTTrainerConfig'
+                'training_config must be an SFTTrainingConfig'
             )
-        if not isinstance(dataset_config, SFTDatasetConfig):
+        if not isinstance(dataset_config, DatasetConfig):
             raise TypeError(
                 'dataset_config must be an SFTDatasetConfig'
             )

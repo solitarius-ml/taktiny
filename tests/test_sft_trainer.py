@@ -10,7 +10,7 @@ from taktiny import nn
 from taktiny.trainer import (
     SFTDatasetConfig,
     SFTTrainer,
-    SFTTrainerConfig,
+    SFTTrainingConfig,
 )
 from taktiny.trainer.sft import (
     _SFTDataLoader,
@@ -27,6 +27,9 @@ class FakeTokenizer:
     padding_side = 'right'
     truncation_side = 'right'
 
+    def __init__(self):
+        self.tokenization_batch_sizes = []
+
     @staticmethod
     def _content_ids(text):
         return [3 + ord(character) % 23 for character in text]
@@ -40,6 +43,19 @@ class FakeTokenizer:
         max_length=None,
         **kwargs,
     ):
+        if isinstance(text, (list, tuple)):
+            self.tokenization_batch_sizes.append(len(text))
+            return {
+                'input_ids': [
+                    self(
+                        item,
+                        add_special_tokens=add_special_tokens,
+                        truncation=truncation,
+                        max_length=max_length,
+                    )['input_ids']
+                    for item in text
+                ]
+            }
         ids = self._content_ids(text)
         if add_special_tokens:
             ids = [self.bos_token_id] + ids
@@ -117,16 +133,16 @@ def make_dataset_config(records, **kwargs):
 
 def test_sft_configs_are_exported():
     assert taktiny.SFTTrainer is SFTTrainer
-    assert taktiny.SFTTrainerConfig is SFTTrainerConfig
+    assert taktiny.SFTTrainingConfig is SFTTrainingConfig
     assert taktiny.SFTDatasetConfig is SFTDatasetConfig
 
 
 @pytest.mark.parametrize(
     'factory',
     [
-        lambda: SFTTrainerConfig(completion_only_loss='yes'),
-        lambda: SFTTrainerConfig(assistant_only_loss='yes'),
-        lambda: SFTTrainerConfig(ignore_index=True),
+        lambda: SFTTrainingConfig(completion_only_loss='yes'),
+        lambda: SFTTrainingConfig(assistant_only_loss='yes'),
+        lambda: SFTTrainingConfig(ignore_index=True),
         lambda: SFTDatasetConfig(dataloader=[]),
         lambda: SFTDatasetConfig(
             dataloader=[],
@@ -171,7 +187,7 @@ def test_sft_config_validation(factory):
 
 def test_text_record_uses_full_language_model_labels():
     dataset_config = make_dataset_config([], append_eos=True)
-    trainer_config = SFTTrainerConfig()
+    trainer_config = SFTTrainingConfig()
 
     record = _encode_sft_record(
         {'text': 'abc'},
@@ -185,7 +201,7 @@ def test_text_record_uses_full_language_model_labels():
 
 def test_prompt_completion_masks_prompt_by_default():
     dataset_config = make_dataset_config([], append_eos=False)
-    trainer_config = SFTTrainerConfig()
+    trainer_config = SFTTrainingConfig()
 
     record = _encode_sft_record(
         {'prompt': 'ab', 'completion': 'cd'},
@@ -202,7 +218,7 @@ def test_prompt_completion_masks_prompt_by_default():
 
 def test_prompt_completion_can_train_full_sequence():
     dataset_config = make_dataset_config([], append_eos=False)
-    trainer_config = SFTTrainerConfig(completion_only_loss=False)
+    trainer_config = SFTTrainingConfig(completion_only_loss=False)
 
     record = _encode_sft_record(
         {'prompt': 'ab', 'completion': 'cd'},
@@ -215,7 +231,7 @@ def test_prompt_completion_can_train_full_sequence():
 
 def test_assistant_only_conversation_uses_template_mask():
     dataset_config = make_dataset_config([], append_eos=False)
-    trainer_config = SFTTrainerConfig(assistant_only_loss=True)
+    trainer_config = SFTTrainingConfig(assistant_only_loss=True)
     messages = [
         {'role': 'user', 'content': 'question'},
         {'role': 'assistant', 'content': 'answer'},
@@ -244,7 +260,7 @@ def test_assistant_fallback_masks_every_assistant_turn():
         shuffle=False,
         append_eos=False,
     )
-    trainer_config = SFTTrainerConfig(assistant_only_loss=True)
+    trainer_config = SFTTrainingConfig(assistant_only_loss=True)
     messages = [
         {'role': 'user', 'content': 'one'},
         {'role': 'assistant', 'content': 'first'},
@@ -274,7 +290,7 @@ def test_assistant_fallback_masks_every_assistant_turn():
 
 def test_pretokenized_labels_take_precedence_over_loss_modes():
     dataset_config = make_dataset_config([], append_eos=False)
-    trainer_config = SFTTrainerConfig(
+    trainer_config = SFTTrainingConfig(
         assistant_only_loss=True,
         completion_only_loss=True,
     )
@@ -305,7 +321,7 @@ def test_dynamic_padding_and_left_padding_alignment():
         pad_to_multiple_of=4,
         shuffle=False,
     )
-    trainer_config = SFTTrainerConfig()
+    trainer_config = SFTTrainingConfig()
     records = [
         {'input_ids': [1, 2], 'labels': [1, 2]},
         {'input_ids': [1, 3, 4, 2], 'labels': [1, 3, 4, 2]},
@@ -338,7 +354,7 @@ def test_packing_builds_block_diagonal_attention_and_boundary_labels():
         padding='max_length',
         append_eos=False,
     )
-    trainer_config = SFTTrainerConfig()
+    trainer_config = SFTTrainingConfig()
     loader = _SFTDataLoader(
         config.dataloader,
         config,
@@ -346,6 +362,8 @@ def test_packing_builds_block_diagonal_attention_and_boundary_labels():
         streaming=False,
         shuffle=False,
     )
+
+    assert len(loader) == 1
 
     batch = next(iter(loader))
     mask = batch['attention_mask'][0, 0]
@@ -358,6 +376,48 @@ def test_packing_builds_block_diagonal_attention_and_boundary_labels():
     assert batch['labels'][0, 3] == -100
 
 
+def test_finite_text_loader_tokenizes_column_and_reports_packed_length():
+    class TextColumnDataset:
+        column_names = ['text']
+
+        def __init__(self, texts):
+            self.texts = texts
+            self.column_reads = 0
+
+        def __len__(self):
+            return len(self.texts)
+
+        def __getitem__(self, key):
+            if key == 'text':
+                self.column_reads += 1
+                return self.texts
+            return {'text': self.texts[key]}
+
+    tokenizer = FakeTokenizer()
+    source = TextColumnDataset(['abc'] * 10)
+    config = SFTDatasetConfig(
+        dataloader=source,
+        tokenizer=tokenizer,
+        shuffle=False,
+        drop_remainder=False,
+        batch_size=1,
+        max_length=10,
+        packing=True,
+        padding='max_length',
+    )
+    loader = _SFTDataLoader(
+        config.dataloader,
+        config,
+        SFTTrainingConfig(),
+        streaming=False,
+        shuffle=False,
+    )
+
+    assert source.column_reads == 1
+    assert tokenizer.tokenization_batch_sizes == [10]
+    assert len(loader) == len(list(loader)) == 5
+
+
 def test_sft_grain_iterator_state_restores_next_batch():
     config = make_dataset_config(
         [{'text': str(index)} for index in range(6)],
@@ -368,7 +428,7 @@ def test_sft_grain_iterator_state_restores_next_batch():
     loader = _SFTDataLoader(
         config.dataloader,
         config,
-        SFTTrainerConfig(),
+        SFTTrainingConfig(),
         streaming=False,
         shuffle=False,
     )
@@ -407,7 +467,7 @@ def test_packed_iterator_state_restores_pending_fragment():
     loader = _SFTDataLoader(
         config.dataloader,
         config,
-        SFTTrainerConfig(),
+        SFTTrainingConfig(),
         streaming=False,
         shuffle=False,
     )
@@ -438,7 +498,7 @@ def test_streaming_sft_loader_does_not_require_length():
 
     trainer = SFTTrainer(
         TinyCausalLM(),
-        training_config=SFTTrainerConfig(
+        training_config=SFTTrainingConfig(
             max_steps=1,
             learning_rate=0.1,
         ),
@@ -480,7 +540,7 @@ def test_sft_trainer_inherits_training_loop_and_updates_model():
     }
     trainer = SFTTrainer(
         model,
-        training_config=SFTTrainerConfig(
+        training_config=SFTTrainingConfig(
             max_steps=1,
             learning_rate=0.1,
             log_interval=1,
