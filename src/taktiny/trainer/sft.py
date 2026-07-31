@@ -28,7 +28,7 @@ import optax
 from taktiny.cosettes._common import TransformerContext
 from taktiny.trainer.config import (
     SFTDatasetConfig,
-    SFTTrainerConfig,
+    SFTTrainingConfig,
 )
 from taktiny.trainer.trainer import (
     Trainer,

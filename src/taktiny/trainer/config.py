@@ -227,7 +227,7 @@ class DatasetConfig:
 
 
 @dataclass(frozen=True)
-class SFTTrainerConfig(TrainingConfig):
+class SFTTrainingConfig(TrainingConfig):
     """Training and loss settings for supervised causal language modeling.
 
     ``completion_only_loss=None`` selects completion-only loss automatically
@@ -383,6 +383,6 @@ class SFTDatasetConfig(DatasetConfig):
 __all__ = [
     'DatasetConfig',
     'SFTDatasetConfig',
-    'SFTTrainerConfig',
+    'SFTTrainingConfig',
     'TrainingConfig',
 ]

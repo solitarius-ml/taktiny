@@ -13,6 +13,6 @@
 # limitations under the License.
 """Transformer architectures"""
 
-from taktiny.cosettes.transformers.gemma import *
-from taktiny.cosettes.transformers.llama import *
-from taktiny.cosettes.transformers.qwen import *
+from .gemma import *
+from .llama import *
+from .qwen import *

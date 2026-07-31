@@ -257,3 +257,5 @@ def _make_magic_methods():
     setattr(Parameter, '__getitem__', lambda self, key: operator.getitem(self.value, key))
 
 _make_magic_methods()
+
+__all__ = ['Module', 'Parameter']
