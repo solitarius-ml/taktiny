@@ -1779,7 +1779,7 @@ class Trainer:
                                 _tree_shardings(trainable_params),
                                 _tree_shardings(opt_state),
                             ),
-                            donate_argnums=(0, 1, 2),
+                            donate_argnums=(0, 1),
                         )
                     update_fn = (
                         compiled_optimizer_step or optimizer_step

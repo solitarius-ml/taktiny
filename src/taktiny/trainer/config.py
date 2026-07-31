@@ -30,7 +30,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     log_interval: int = 10
     seed: int = 42
-    jit_compile: bool = False
+    jit_compile: bool = True
     donate_batch: bool = False
     output_dir: str | PathLike | None = None
     save_steps: Optional[int] = None

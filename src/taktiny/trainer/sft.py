@@ -29,6 +29,8 @@ from taktiny.cosettes._common import TransformerContext
 from taktiny.trainer.config import (
     SFTDatasetConfig,
     SFTTrainingConfig,
+    TrainingConfig,
+    DatasetConfig
 )
 from taktiny.trainer.trainer import (
     Trainer,
@@ -736,18 +738,18 @@ class SFTTrainer(Trainer):
     def __init__(
         self,
         model,
-        training_config: SFTTrainerConfig,
+        training_config: SFTTrainingConfig,
         dataset_config: SFTDatasetConfig,
         *,
         loss_fn=None,
         callbacks=None,
         compute_metrics=None,
     ):
-        if not isinstance(training_config, SFTTrainerConfig):
+        if not isinstance(training_config, TrainingConfig):
             raise TypeError(
-                'training_config must be an SFTTrainerConfig'
+                'training_config must be an SFTTrainingConfig'
             )
-        if not isinstance(dataset_config, SFTDatasetConfig):
+        if not isinstance(dataset_config, DatasetConfig):
             raise TypeError(
                 'dataset_config must be an SFTDatasetConfig'
             )
