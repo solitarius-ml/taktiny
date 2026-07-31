@@ -37,7 +37,7 @@ Random number generator (PRNG) state management is handled through `nn.Rngs`. Pa
 ```python
 from taktiny import nn
 
-# Initialize Rngs with a integer seed or JAX key
+# Initialize Rngs with an integer seed or JAX key
 rngs = nn.Rngs(42)
 
 # Calling rngs() splits the internal key and returns a new subkey
