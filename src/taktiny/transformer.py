@@ -11,21 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""vLLM inference and rollout integration."""
+from __future__ import annotations
 
-from ._base import VLLM, VLLMEngine
-from ._local import LocalVLLMEngine
-from ._sync import (
-    GPUWeightSync,
-    TPUWeightSync,
-    WeightSyncAdapter,
+from taktiny.cosettes._common import (
+    TransformerContext, 
+    TransformerCausalLM, 
+    TransformerConditionalGeneration, 
+    TransformerDecoderLayer, 
+    TransformerModel
 )
 
-__all__ = [
-    'GPUWeightSync',
-    'TPUWeightSync',
-    'VLLM',
-    'VLLMEngine',
-    'LocalVLLMEngine',
-    'WeightSyncAdapter',
-]
+# Llama
+from taktiny.cosettes.transformers import LlamaDecoderLayer
+
+# Qwen 
+from taktiny.cosettes.transformers import QwenDecoderLayer, Qwen2DecoderLayer
+
+# Gemma
+from taktiny.cosettes.transformers import (
+    GemmaDecoderLayer, 
+    Gemma2DecoderLayer, 
+    Gemma3DecoderLayer
+)

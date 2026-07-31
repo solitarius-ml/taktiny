@@ -16,18 +16,14 @@
 from __future__ import annotations
 
 import importlib
-import math
 from typing import Protocol, runtime_checkable
 
 import jax
 import numpy as np
-import qwix
 
 from ._weights import (
     WeightMapper,
     iter_checkpoint_weights,
-    iter_internal_weight_specs,
-    iter_internal_weights,
 )
 
 
@@ -260,189 +256,14 @@ class GPUWeightSync:
         self._llm = None
 
 
-def _flat_nnx_state(state):
-    flat_state = getattr(state, 'flat_state', None)
-    if not callable(flat_state):
-        raise TypeError(
-            'The TPU vLLM model runner does not expose an NNX state'
-        )
-    return {
-        '.'.join(str(part) for part in path): variable
-        for path, variable in flat_state()
-    }
-
-
-def _target_candidates(name):
-    candidates = [name]
-    if '.embed_tokens.embedding' in name:
-        candidates.append(
-            name.replace(
-                '.embed_tokens.embedding',
-                '.embed.embedding',
-            )
-        )
-
-    if name.endswith('.weight'):
-        stem = name.removesuffix('.weight')
-        if (
-            'layernorm' in stem
-            or stem.endswith('.norm')
-            or '.norm.' in stem
-        ):
-            candidates.append(f'{stem}.scale')
-        else:
-            candidates.append(f'{stem}.kernel')
-
-    if name == 'lm_head.weight':
-        candidates.extend(('model.lm_head', 'lm_head'))
-
-    return tuple(dict.fromkeys(candidates))
-
-
-def _get_variable_value(variable):
-    getter = getattr(variable, 'get_value', None)
-    return getter() if callable(getter) else getattr(variable, 'value')
-
-
-def _set_variable_value(variable, value):
-    setter = getattr(variable, 'set_value', None)
-    if callable(setter):
-        setter(value)
-    else:
-        variable.value = value
-
-
-class TPUWeightSync:
-    """Synchronize weights directly into an in-process vLLM JAX model."""
-
-    def configure(self, llm_options):
-        if 'weight_transfer_config' in llm_options:
-            raise ValueError(
-                'TPUWeightSync uses direct JAX state transfer and does not '
-                'accept weight_transfer_config'
-            )
-
-    @staticmethod
-    def _model_runner(llm):
-        try:
-            return llm.llm_engine.model_executor.driver_worker.model_runner
-        except AttributeError as error:
-            raise RuntimeError(
-                'TPU weight synchronization requires an in-process vLLM '
-                'model runner'
-            ) from error
-
-    def sync(
-        self,
-        engine,
-        model,
-        *,
-        policy_version,
-        strict=True,
-        **kwargs,
-    ):
-        if kwargs:
-            names = ', '.join(sorted(kwargs))
-            raise TypeError(f'Unexpected TPU sync options: {names}')
-        if not isinstance(strict, bool):
-            raise TypeError('strict must be a boolean')
-
-        llm = engine.llm
-        runner = self._model_runner(llm)
-        target = _flat_nnx_state(getattr(runner, 'state', None))
-        missing = []
-        targets = {}
-
-        for name, shape, _ in iter_internal_weight_specs(model):
-            variable = next(
-                (
-                    target[candidate]
-                    for candidate in _target_candidates(name)
-                    if candidate in target
-                ),
-                None,
-            )
-            if variable is None:
-                missing.append(name)
-                continue
-
-            target_value = _get_variable_value(variable)
-            if isinstance(target_value, qwix.QArray):
-                raise NotImplementedError(
-                    'Direct synchronization into a Qwix-quantized vLLM '
-                    'target is not supported'
-                )
-            if shape != target_value.shape:
-                if math.prod(shape) != target_value.size:
-                    raise ValueError(
-                        f'vLLM target shape mismatch for {name!r}: '
-                        f'{shape} != {target_value.shape}'
-                    )
-            targets[name] = (variable, target_value)
-
-        if strict and missing:
-            preview = ', '.join(missing[:8])
-            if len(missing) > 8:
-                preview += f', ... ({len(missing)} total)'
-            raise ValueError(
-                'vLLM target has no matching parameters for: '
-                f'{preview}'
-            )
-
-        reset_prefix_cache = getattr(llm, 'reset_prefix_cache', None)
-        if callable(reset_prefix_cache):
-            reset_prefix_cache()
-
-        collective_rpc = getattr(llm, 'collective_rpc', None)
-        if not callable(collective_rpc):
-            collective_rpc = getattr(
-                getattr(llm, 'llm_engine', None),
-                'collective_rpc',
-                None,
-            )
-        if not callable(collective_rpc):
-            raise RuntimeError(
-                'TPU weight synchronization requires vLLM collective_rpc'
-            )
-        collective_rpc('delete_kv_cache')
-
-        try:
-            for name, value, _ in iter_internal_weights(model):
-                target_entry = targets.get(name)
-                if target_entry is None:
-                    continue
-                variable, target_value = target_entry
-                if value.shape != target_value.shape:
-                    value = value.reshape(target_value.shape)
-                value = value.astype(target_value.dtype)
-                sharding = getattr(target_value, 'sharding', None)
-                if sharding is not None:
-                    value = jax.device_put(value, sharding)
-                _set_variable_value(variable, value)
-            jax.effects_barrier()
-
-            if hasattr(runner, 'state_leaves'):
-                runner.state_leaves = tuple(
-                    jax.tree_util.tree_leaves(runner.state)
-                )
-            update_version = getattr(llm, 'update_weight_version', None)
-            if callable(update_version):
-                update_version(str(policy_version))
-        finally:
-            collective_rpc('reinitialize_kv_cache')
-
-    def close(self):
-        pass
-
-
 def default_weight_sync(platform, **kwargs):
     if platform == 'gpu':
         return GPUWeightSync(**kwargs)
     if platform == 'tpu':
-        if kwargs:
-            names = ', '.join(sorted(kwargs))
-            raise TypeError(f'Unexpected TPU synchronizer options: {names}')
-        return TPUWeightSync()
+        raise NotImplementedError(
+            'TakTiny does not provide a vLLM TPU weight synchronizer. '
+            'vLLM TPU models use a different model and KV-cache contract.'
+        )
     raise NotImplementedError(
         f'No vLLM weight synchronizer for platform {platform!r}'
     )
@@ -450,7 +271,6 @@ def default_weight_sync(platform, **kwargs):
 
 __all__ = [
     'GPUWeightSync',
-    'TPUWeightSync',
     'WeightSyncAdapter',
     'default_weight_sync',
 ]

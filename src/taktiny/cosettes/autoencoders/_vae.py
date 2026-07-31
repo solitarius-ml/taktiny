@@ -12,12 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+# DEPRECATED / LEGACY
+# TODO(refactor).
 from __future__ import annotations
 
 import jax
 from taktiny import nn
 from taktiny import layers
+from taktiny.cosettes.unets._unet import get_down_block, get_up_block, UNetMidBlock2D
+from taktiny.layers import SpatialNorm
 
 class SpatialAttention(nn.Module):
     def __init__(self, dim: int, seed: nn.Rngs):
@@ -191,8 +194,6 @@ class Autoencoder(nn.Module):
         reconstructed = self.decoder(latent)
         return reconstructed, latent
 
-from taktiny.cosettes.unets._unet import get_down_block, get_up_block, UNetMidBlock2D
-
 class Encoder(nn.Module):
     r"""
     The `Encoder` layer of a variational autoencoder that encodes its input into a latent representation.
@@ -304,9 +305,6 @@ class Encoder(nn.Module):
         sample = self.conv_out(sample)
 
         return sample
-
-
-from taktiny.layers import SpatialNorm
 
 class Decoder(nn.Module):
     r"""

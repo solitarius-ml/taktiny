@@ -1,5 +1,5 @@
+# Copyright 2026 Shinapri
 # pylint: skip-file
-from __future__ import annotations
 
 # Copyright 2023–2026 Google LLC
 #
@@ -17,6 +17,8 @@ from __future__ import annotations
 
 
 # Implementation of Sparse Flash Attention, a.k.a. "Splash" attention.
+
+from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import dataclasses

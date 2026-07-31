@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""A high-performance Deep Learning framework built on JAX"""
+"""A Deep Learning framework built on JAX"""
 
 __author__ = "Shinapri"
 __version__ = "0.0.1"
 __description__ = (
-    "A high-performance Deep Learning framework built on JAX, featuring OOP-style modeling, "
+    "A Deep Learning framework built on JAX, featuring OOP-style modeling, "
     "full-lifecycle trainers, and native architectures spanning Transformers, Diffusion, and SSMs."
 )
 
@@ -29,7 +29,7 @@ from taktiny.trainer import (
     DatasetConfig,
     SFTDatasetConfig,
     SFTTrainer,
-    SFTTrainerConfig,
+    SFTTrainingConfig,
     TensorBoardCallback,
     Trainer,
     TrainerCallback,
@@ -53,9 +53,10 @@ __all__ = [
     'DatasetConfig',
     'SFTDatasetConfig',
     'SFTTrainer',
-    'SFTTrainerConfig',
+    'SFTTrainingConfig',
     'tt',
     'nn',
     'layers',
     'kernels',
+    'peft'
 ]

@@ -6,15 +6,14 @@ import numpy as np
 import pytest
 
 from taktiny import nn
-from taktiny.integrates.vllm import (
+from taktiny.ensembles.vllm import (
     GPUWeightSync,
     LocalVLLMEngine,
-    TPUWeightSync,
     VLLM,
 )
-from taktiny.integrates.vllm import _local as vllm_local
-from taktiny.integrates.vllm import _sync as vllm_sync
-from taktiny.integrates.vllm._weights import iter_checkpoint_weights
+from taktiny.ensembles.vllm import _local as vllm_local
+from taktiny.ensembles.vllm import _sync as vllm_sync
+from taktiny.ensembles.vllm._weights import iter_checkpoint_weights
 from taktiny.cosettes._base import PretrainedModel
 from taktiny.nn.lora import LoRALinear
 
@@ -233,6 +232,22 @@ def test_vllm_sync_versions_only_successful_updates():
     assert runtime.policy_version == 1
 
 
+def test_vllm_sync_accepts_explicit_policy_version():
+    model = object()
+    engine = FakeEngine()
+    runtime = VLLM(model, engine=engine, auto_start=False)
+
+    assert runtime.sync(policy_version=5) == 5
+    assert runtime.policy_version == 5
+    assert engine.sync_calls == [(model, 5, {})]
+
+    with pytest.raises(
+        ValueError,
+        match='greater than the current policy version',
+    ):
+        runtime.sync(policy_version=5)
+
+
 def test_vllm_close_is_idempotent_and_blocks_use():
     engine = FakeEngine()
     runtime = VLLM(object(), engine=engine, auto_start=False)
@@ -376,24 +391,17 @@ def test_vllm_generate_rejects_offline_streamer(fake_vllm):
         )
 
 
-def test_local_vllm_tpu_selects_jax_backend(
-    fake_vllm,
-    monkeypatch,
-):
+def test_local_vllm_rejects_non_taktiny_tpu_backend(monkeypatch):
     monkeypatch.delenv('TPU_BACKEND_TYPE', raising=False)
     monkeypatch.delenv('MODEL_IMPL_TYPE', raising=False)
-    engine = LocalVLLMEngine(tiny_model(), platform='tpu')
+    with pytest.raises(
+        NotImplementedError,
+        match='cannot execute a TakTiny nn.Module',
+    ):
+        LocalVLLMEngine(tiny_model(), platform='tpu')
 
-    engine.start()
-
-    assert engine.platform == 'tpu'
-    assert engine.llm is FakeLLM.instances[0]
-    assert vllm_local.os.environ['TPU_BACKEND_TYPE'] == 'jax'
-    assert vllm_local.os.environ['MODEL_IMPL_TYPE'] == 'flax_nnx'
-    assert (
-        vllm_local.os.environ['VLLM_ENABLE_V1_MULTIPROCESSING']
-        == '0'
-    )
+    assert 'TPU_BACKEND_TYPE' not in vllm_local.os.environ
+    assert 'MODEL_IMPL_TYPE' not in vllm_local.os.environ
 
 
 def test_local_vllm_reports_platform_dependency(monkeypatch):
@@ -541,79 +549,6 @@ def test_checkpoint_weight_export_expands_compact_layers_in_order():
         weights[1][1],
         np.arange(6.0, 12.0).reshape(2, 3).T,
     )
-
-
-class FakeNNXVariable:
-    def __init__(self, value):
-        self.value = value
-
-    def get_value(self):
-        return self.value
-
-    def set_value(self, value):
-        self.value = value
-
-
-class FakeNNXState:
-    def __init__(self, values):
-        self.values = values
-
-    def flat_state(self):
-        return [
-            (tuple(name.split('.')), variable)
-            for name, variable in self.values.items()
-        ]
-
-
-def test_tpu_sync_replaces_in_process_jax_state(fake_vllm):
-    model = TinySyncModel()
-    engine = LocalVLLMEngine(
-        model,
-        platform='tpu',
-        sync_adapter=TPUWeightSync(),
-    )
-    engine.start()
-    target = FakeNNXState({
-        'model.embed.embedding': FakeNNXVariable(
-            jnp.zeros((3, 2)),
-        ),
-        'model.proj.kernel': FakeNNXVariable(
-            jnp.zeros((2, 3)),
-        ),
-    })
-    runner = SimpleNamespace(
-        state=target,
-        state_leaves=(),
-    )
-    engine.llm.llm_engine.model_executor = SimpleNamespace(
-        driver_worker=SimpleNamespace(model_runner=runner),
-    )
-
-    engine.sync(model, policy_version=4)
-
-    np.testing.assert_array_equal(
-        target.values['model.embed.embedding'].value,
-        model.model.embed_tokens.embedding.value,
-    )
-    expected = (
-        model.model.proj.base_layer.weight.value
-        + (
-            model.model.proj.lora_A.value
-            @ model.model.proj.lora_B.value
-        )
-        * model.model.proj.scaling
-    )
-    np.testing.assert_allclose(
-        target.values['model.proj.kernel'].value,
-        expected,
-    )
-    assert engine.llm.weight_calls == [
-        ('reset_prefix_cache',),
-        ('collective_rpc', 'delete_kv_cache'),
-        ('version', '4'),
-        ('collective_rpc', 'reinitialize_kv_cache'),
-    ]
-    assert runner.state_leaves
 
 
 def test_gpu_sync_uses_vllm_ipc_lifecycle(

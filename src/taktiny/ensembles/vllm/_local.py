@@ -88,6 +88,14 @@ class LocalVLLMEngine:
                 'Local vLLM inference requires a GPU or TPU JAX backend, '
                 f'got {platform!r}'
             )
+        if platform == 'tpu':
+            raise NotImplementedError(
+                'Local vLLM TPU cannot execute a TakTiny nn.Module yet. '
+                'The vLLM TPU JAX backend requires a model implementing its '
+                'paged KV-cache and AttentionMetadata contract; loading a '
+                'separate Flax NNX model is intentionally not used. Pass a '
+                'TakTiny-compatible VLLMEngine to VLLM(engine=...) instead.'
+            )
         if not isinstance(use_tqdm, bool) and not callable(use_tqdm):
             raise TypeError('use_tqdm must be a boolean or callable')
         if not isinstance(sync_packed, bool):
@@ -117,10 +125,6 @@ class LocalVLLMEngine:
         return self._llm
 
     def _import_vllm(self):
-        if self.platform == 'tpu':
-            os.environ.setdefault('TPU_BACKEND_TYPE', 'jax')
-            os.environ.setdefault('MODEL_IMPL_TYPE', 'flax_nnx')
-            os.environ['VLLM_ENABLE_V1_MULTIPROCESSING'] = '0'
         try:
             module = importlib.import_module('vllm')
         except ModuleNotFoundError as error:

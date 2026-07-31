@@ -471,6 +471,12 @@ class Trainer:
             if callable(method):
                 method(self, **kwargs)
 
+    def _after_optimizer_step(self, params, logs):
+        """Run subclass bookkeeping after a successful optimizer update."""
+
+    def _before_train_end(self):
+        """Run subclass finalization before train-end callbacks."""
+
     @staticmethod
     def _set_dataloader_epoch(dataloader, epoch):
         candidates = (
@@ -1819,6 +1825,14 @@ class Trainer:
                     'loss_scale': self.loss_scale,
                     'skipped_update': update_skipped,
                 }
+                if not update_skipped:
+                    self._after_optimizer_step(
+                        _combine_params(
+                            trainable_params,
+                            frozen_params,
+                        ),
+                        dict(step_logs),
+                    )
                 self._call_event(
                     'on_step_end',
                     logs=dict(step_logs),
@@ -2184,6 +2198,7 @@ class Trainer:
                 f'[dim]Loaded best checkpoint from '
                 f'{self.best_model_checkpoint}[/dim]'
             )
+        self._before_train_end()
         self._call_event('on_train_end')
         console.print("[bold green]✨ Training complete![/bold green]")
         
