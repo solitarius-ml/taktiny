@@ -18,11 +18,18 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import math
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from taktiny import nn
 from taktiny.layers.posemb import RotaryEmbedding
 from taktiny.utils.typing import ShardMode, DType
+
+
+class SegmentIds(NamedTuple):
+    """Compact query and key/value segment identifiers."""
+
+    q: jax.Array
+    kv: jax.Array
 
 
 class Attention(nn.Module):
@@ -209,6 +216,53 @@ class Attention(nn.Module):
                 f'[{batch_size}, {num_heads}, {query_length}, {key_length}], '
                 f'got {mask.shape}'
             ) from error
+
+    @classmethod
+    def _normalize_segment_ids(
+        cls,
+        segment_ids,
+        *,
+        batch_size: int,
+        query_length: int,
+        key_length: int,
+    ) -> SegmentIds | None:
+        if segment_ids is None:
+            return None
+        if hasattr(segment_ids, 'q') and hasattr(segment_ids, 'kv'):
+            query_segments = jnp.asarray(segment_ids.q, dtype=jnp.int32)
+            key_segments = jnp.asarray(segment_ids.kv, dtype=jnp.int32)
+        else:
+            query_segments = jnp.asarray(segment_ids, dtype=jnp.int32)
+            key_segments = query_segments
+
+        if query_segments.ndim == 1:
+            query_segments = query_segments[None, :]
+        if key_segments.ndim == 1:
+            key_segments = key_segments[None, :]
+        try:
+            query_segments = jnp.broadcast_to(
+                query_segments,
+                (batch_size, query_length),
+            )
+            key_segments = jnp.broadcast_to(
+                key_segments,
+                (batch_size, key_length),
+            )
+        except ValueError as error:
+            raise ValueError(
+                'segment IDs must be broadcastable to [batch, sequence]'
+            ) from error
+        return SegmentIds(query_segments, key_segments)
+
+    @staticmethod
+    def _merge_segment_mask(mask, segment_ids: SegmentIds):
+        segment_mask = (
+            segment_ids.q[:, None, :, None]
+            == segment_ids.kv[:, None, None, :]
+        )
+        if mask is None:
+            return segment_mask
+        return jnp.asarray(mask, dtype=jnp.bool_) & segment_mask
         
     @classmethod
     def apply_flash_attention(
@@ -508,6 +562,7 @@ class Attention(nn.Module):
         bias: jax.Array = None,
         scale: float = None,
         is_causal: bool = False,
+        segment_ids=None,
         **kwargs,
     ) -> jax.Array:
         """
@@ -517,9 +572,17 @@ class Attention(nn.Module):
         if not isinstance(kernel, str):
             raise TypeError(
                 f'kernel must be a string, got {type(kernel).__name__}'
-            )
+        )
         kernel = kernel.lower()
+        segment_ids = cls._normalize_segment_ids(
+            segment_ids,
+            batch_size=query.shape[0],
+            query_length=query.shape[1],
+            key_length=key.shape[1],
+        )
         if kernel in ("dot_product", "standard", "jax"):
+            if segment_ids is not None:
+                mask = cls._merge_segment_mask(mask, segment_ids)
             return jax.nn.dot_product_attention(
                 query=query,
                 key=key,
@@ -547,13 +610,14 @@ class Attention(nn.Module):
                 value,
                 mask=mask,
                 scale=scale,
+                segment_ids=segment_ids,
                 **kwargs,
             )
         elif kernel in ("ragged", "ragged_attention"):
-            if mask is not None or bias is not None:
+            if mask is not None or bias is not None or segment_ids is not None:
                 raise ValueError(
                     'Ragged attention uses lengths for prefix masking and '
-                    'does not support mask or bias'
+                    'does not support mask, bias, or segment IDs'
                 )
             return cls.apply_ragged_attention(
                 query,
@@ -579,6 +643,7 @@ class Attention(nn.Module):
                 value,
                 mask=mask,
                 scale=scale,
+                segment_ids=segment_ids,
                 **kwargs,
             )
         elif kernel in ("ring", "ring_attention"):
@@ -592,6 +657,7 @@ class Attention(nn.Module):
                 key,
                 value,
                 scale=scale,
+                segment_ids=segment_ids,
                 **kwargs,
             )
         else:
@@ -628,6 +694,26 @@ class Attention(nn.Module):
             q, k = self.pos_emb(q, k, position_idx)
 
         q = self._scale_query(q, position_idx)
+
+        segment_ids = None
+        if position_idx is not None:
+            token_positions = jnp.asarray(position_idx, dtype=jnp.int32)
+            if token_positions.ndim == 2:
+                expected_shape = (q.shape[0], q.shape[1])
+                if token_positions.shape != expected_shape:
+                    raise ValueError(
+                        'position_ids must have shape '
+                        f'{expected_shape}, got {token_positions.shape}'
+                    )
+                packed_segments = jnp.cumsum(
+                    token_positions == 0,
+                    axis=-1,
+                    dtype=jnp.int32,
+                )
+                segment_ids = SegmentIds(
+                    packed_segments,
+                    packed_segments,
+                )
         
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
@@ -688,21 +774,29 @@ class Attention(nn.Module):
                     query_positions = (
                         query_start[:, None] + query_offsets[None, :]
                     )
+                elif query_start.ndim == 2:
+                    if query_start.shape != (q.shape[0], q_len):
+                        raise ValueError(
+                            'position_ids must match [batch, sequence]'
+                        )
+                    query_positions = query_start
                 else:
                     raise ValueError(
-                        'position_idx must be a scalar or a batch vector'
+                        'position_idx must be a scalar, batch vector, or '
+                        'per-token matrix'
                     )
 
                 # Cached keys use absolute positions from the start of the
                 # sequence. Uncached keys belong to the same local chunk as Q.
-                key_start = (
-                    jnp.asarray(0, dtype=jnp.int32)
-                    if kv_cache is not None
-                    else query_start
-                )
-                key_positions = key_start + jnp.arange(
-                    k_len, dtype=jnp.int32
-                )
+                if kv_cache is not None:
+                    key_positions = jnp.arange(k_len, dtype=jnp.int32)
+                elif query_start.ndim == 2:
+                    key_positions = query_start
+                else:
+                    key_positions = query_start + jnp.arange(
+                        k_len,
+                        dtype=jnp.int32,
+                    )
 
                 if query_positions.ndim == 1:
                     causal_mask = (
@@ -713,11 +807,13 @@ class Attention(nn.Module):
                         query_positions[:, None] - self.window_size + 1
                     )
                 else:
+                    if key_positions.ndim == 1:
+                        key_positions = key_positions[None, :]
                     causal_mask = (
-                        key_positions[None, None, :]
+                        key_positions[:, None, :]
                         <= query_positions[:, :, None]
                     )
-                    window_mask = key_positions[None, None, :] >= (
+                    window_mask = key_positions[:, None, :] >= (
                         query_positions[:, :, None]
                         - self.window_size
                         + 1
@@ -773,6 +869,7 @@ class Attention(nn.Module):
             mask=attention_mask,
             scale=self.scaling,
             is_causal=is_causal,
+            segment_ids=segment_ids,
         )
         
         # Output projection from (Batch, SeqLen, Heads, HeadDim) directly to (Batch, SeqLen, HiddenSize)

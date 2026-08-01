@@ -117,12 +117,14 @@ class Gemma2(TransformerCausalLM):
         self,
         x,
         attention_mask=None,
+        position_ids=None,
         ctx=None,
         logits_to_keep=0,
     ):
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             ctx=ctx,
             logits_to_keep=logits_to_keep,
         )
@@ -210,12 +212,14 @@ class Gemma3(TransformerCausalLM):
         self,
         x,
         attention_mask=None,
+        position_ids=None,
         ctx=None,
         logits_to_keep=0,
     ):
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             ctx=ctx,
             logits_to_keep=logits_to_keep,
         )

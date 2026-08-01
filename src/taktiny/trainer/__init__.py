@@ -15,5 +15,4 @@
 from .trainer import *
 from .config import *
 from .callbacks import *
-from .sft import *
-from .rl import *
+from .rl.rl import *

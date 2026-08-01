@@ -64,9 +64,16 @@ class RotaryEmbedding(nn.Module):
                 positions = positions + position_idx
             elif position_idx.ndim == 1:
                 positions = position_idx[:, None] + positions[None, :]
+            elif position_idx.ndim == 2:
+                if position_idx.shape[1] != seq_len:
+                    raise ValueError(
+                        'per-token position_ids must match sequence length'
+                    )
+                positions = position_idx
             else:
                 raise ValueError(
-                    'position_idx must be a scalar or a batch vector'
+                    'position_idx must be a scalar, batch vector, or '
+                    'per-token matrix'
                 )
 
         if positions.ndim == 1:

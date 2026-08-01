@@ -45,7 +45,11 @@ class QwenRotaryEmbedding(RotaryEmbedding):
             if position_idx is None
             else jnp.asarray(position_idx, dtype=jnp.int32)
         )
-        total_length = position_start + seq_len
+        total_length = (
+            jnp.max(position_start, axis=-1) + 1
+            if position_start.ndim == 2
+            else position_start + seq_len
+        )
 
         ntk_alpha = jnp.asarray(1.0, dtype=jnp.float32)
         if self.use_dynamic_ntk:
@@ -77,9 +81,18 @@ class QwenRotaryEmbedding(RotaryEmbedding):
                 position_start[:, None] + offsets[None, :]
             ).astype(jnp.float32)
             freqs = jnp.einsum('bs,bd->bsd', positions, inv_freq)
+        elif position_start.ndim == 2:
+            if position_start.shape[1] != seq_len:
+                raise ValueError(
+                    'per-token position_ids must match sequence length'
+                )
+            inv_freq = 1.0 / jnp.power(base[:, None], exponent[None, :])
+            positions = position_start.astype(jnp.float32)
+            freqs = jnp.einsum('bs,bd->bsd', positions, inv_freq)
         else:
             raise ValueError(
-                'position_idx must be a scalar or a batch vector'
+                'position_idx must be a scalar, batch vector, or '
+                'per-token matrix'
             )
         emb = jnp.concatenate((freqs, freqs), axis=-1)
         if emb.ndim == 2:
@@ -133,9 +146,16 @@ class QwenAttention(Attention):
             positions = position_start + offsets
         elif position_start.ndim == 1:
             positions = position_start[:, None] + offsets[None, :]
+        elif position_start.ndim == 2:
+            if position_start.shape[1] != query.shape[1]:
+                raise ValueError(
+                    'per-token position_ids must match sequence length'
+                )
+            positions = position_start + 1
         else:
             raise ValueError(
-                'position_idx must be a scalar or a batch vector'
+                'position_idx must be a scalar, batch vector, or '
+                'per-token matrix'
             )
         scale = jnp.where(
             positions > self.seq_length,

@@ -198,9 +198,9 @@ class RLBaseTrainer(Trainer):
 
     Args:
         model: Trainable model or runtime wrapping the trainable model.
-        loss_fn: Loss function accepted by :class:`Trainer`.
         training_config: Generic training configuration.
         dataset_config: Generic dataset configuration.
+        loss_fn: Loss function accepted by :class:`Trainer`.
         runtime: Optional runtime supplied separately from ``model``. Its
             ``model`` attribute must reference the same model instance.
         callbacks: Optional Trainer callbacks.
@@ -210,10 +210,10 @@ class RLBaseTrainer(Trainer):
     def __init__(
         self,
         model,
-        loss_fn,
         training_config,
         dataset_config,
         *,
+        loss_fn,
         runtime: PolicyRuntime | None = None,
         callbacks=None,
         compute_metrics=None,
@@ -259,9 +259,9 @@ class RLBaseTrainer(Trainer):
 
         super().__init__(
             policy_model,
-            loss_fn,
             training_config,
             dataset_config,
+            loss_fn=loss_fn,
             callbacks=callbacks,
             compute_metrics=compute_metrics,
         )
