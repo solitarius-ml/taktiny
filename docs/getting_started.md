@@ -1,108 +1,122 @@
-# Getting Started with TakTiny
+# Getting Started
 
-This guide helps you set up TakTiny and run your first models and custom kernels in 5 minutes.
+## Installation
 
----
-
-## 1. Installation
-
-TakTiny is built on top of JAX and can be installed via `uv` or `pip`:
+Taktiny requires Python 3.11 or newer.
 
 ```bash
-# Using uv (recommended)
 uv add taktiny
-
-# Or using pip
-pip install taktiny
 ```
 
-Ensure JAX is installed with appropriate hardware support (CPU, GPU, or TPU).
+Install the JAX build appropriate for the CPU, GPU, or TPU environment. Model
+loading also requires enough host memory for checkpoint decoding and enough
+device memory for parameters, temporary computations, and KV caches.
 
----
+## Load and Generate
 
-## 2. Quickstart Examples
-
-### Example A: Zero-Allocation Model Inspection (`Maestro.eval_shape`)
-
-Inspect the exact shape, layer hierarchy, and parameters of large models (such as `google/gemma-4-12B-it`) with zero memory allocation:
+The following example uses an implemented Qwen2 checkpoint:
 
 ```python
-import jax
-from taktiny.maestro import Maestro
+from taktiny import Maestro
+from transformers import AutoTokenizer
 
-# Construct abstract model without loading or allocating physical GPU/TPU memory
-abstract_model = Maestro.eval_shape("google/gemma-4-12B-it")
+repo = "Qwen/Qwen2.5-0.5B"
 
-print("Model Class:", type(abstract_model).__name__)
-print("Language Model:", type(abstract_model.language_model).__name__)
-print("Embedding Shape:", abstract_model.language_model.model.embed_tokens.embedding.value.shape)
+tokenizer = AutoTokenizer.from_pretrained(repo)
+model = Maestro.from_pretrained(
+    repo,
+    dtype="bfloat16",
+    use_list=False,
+)
+
+batch = tokenizer("Once upon a time", return_tensors="np")
+output_ids = model.generate(
+    batch.input_ids,
+    attention_mask=batch.attention_mask,
+    max_new_tokens=64,
+    temperature=0.7,
+    top_p=0.9,
+    seed=42,
+)
+
+print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
 ```
 
----
+`use_list=False` stores decoder parameters in `nn.SeqStack` and executes the
+layers through `jax.lax.scan`. `use_list=True` stores separate layer objects
+and executes a Python-unrolled layer loop. Both modes preserve sequential
+decoder semantics.
 
-### Example B: Building a Custom Transformer Module
+## Stream Text
 
-Use TakTiny's OOP `nn.Module` semantics and `nn.Rngs` state management:
+`generate` accepts a Transformers-compatible streamer. Streaming currently
+requires batch size one.
 
 ```python
-import jax
-import jax.numpy as jnp
-from taktiny import nn, layers
+from transformers import TextStreamer
 
-class CustomTransformerBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, head_dim: int, rngs: nn.Rngs):
-        self.attn_norm = nn.RMSNorm(hidden_size)
-        self.attn = layers.Attention(hidden_size, num_heads, head_dim, rngs=rngs)
-        self.mlp_norm = nn.RMSNorm(hidden_size)
-        self.mlp = layers.GateMLP(hidden_size, intermediate_size=hidden_size * 4, rngs=rngs)
+streamer = TextStreamer(
+    tokenizer,
+    skip_prompt=True,
+    skip_special_tokens=True,
+)
 
-    def __call__(self, x: jax.Array) -> jax.Array:
-        # Residual attention block
-        h = x + self.attn(self.attn_norm(x))[0]
-        # Residual MLP block
-        out = h + self.mlp(self.mlp_norm(h))
-        return out
-
-rngs = nn.Rngs(42)
-block = CustomTransformerBlock(hidden_size=256, num_heads=8, head_dim=32, rngs=rngs)
-
-x = jnp.ones((2, 16, 256))
-output = block(x)
-print("Output shape:", output.shape)  # (2, 16, 256)
+output_ids = model.generate(
+    batch.input_ids,
+    attention_mask=batch.attention_mask,
+    max_new_tokens=64,
+    temperature=0.7,
+    streamer=streamer,
+    seed=42,
+)
 ```
 
----
+Use `model.stream_generate(...)` directly when token IDs are needed one decode
+step at a time instead of decoded text.
 
-### Example C: Invoking Custom Kernel Entry Points
+## Inspect Without Loading Weights
 
-Apply high-performance kernels directly via classmethods on layer classes:
+`Maestro.eval_shape` downloads or reads only configuration metadata and builds
+abstract `jax.ShapeDtypeStruct` leaves. It does not download checkpoint shards
+or allocate parameter buffers.
 
 ```python
-import jax
-import jax.numpy as jnp
-from taktiny.layers import Attention, MoeFFN
+from taktiny import Maestro
 
-# 1. FlashAttention
-q = jnp.ones((2, 8, 4, 16))
-k = jnp.ones((2, 8, 4, 16))
-v = jnp.ones((2, 8, 4, 16))
-flash_out = Attention.apply_flash_attention(q, k, v)
-print("FlashAttention output shape:", flash_out.shape)
-
-# 2. Megablox MoE Grouped Matrix Multiply (GMM)
-tokens = jnp.ones((16, 32))
-indices = jnp.array([0, 1, 0, 1, 2, 2, 1, 0, 0, 1, 2, 0, 1, 2, 0, 1])
-sorted_tokens, group_sizes = MoeFFN.apply_route(tokens, indices, num_groups=3)
-
-weights = jnp.ones((3, 32, 64))
-gmm_out = MoeFFN.apply_gmm(sorted_tokens, weights, group_sizes)
-print("MoE GMM output shape:", gmm_out.shape)  # (16, 64)
+abstract_model = Maestro.eval_shape(
+    "Qwen/Qwen2.5-0.5B",
+    use_list=False,
+)
+print(abstract_model)
 ```
 
----
+Abstract construction does not estimate compilation memory, runtime
+temporaries, optimizer state, activations, or KV-cache memory.
 
-## Next Steps
+## Quantized Loading
 
-- Explore [Core Concepts](core_concepts.md) to understand state and sharding.
-- Browse [Maestro Architectures](maestro_architectures.md) for pre-trained model loading.
-- Check [Custom Kernels](custom_kernels.md) for Pallas attention and MoE ops.
+Uniform weight-only quantization can be selected with a dtype shortcut:
+
+```python
+model = Maestro.from_pretrained(
+    "Qwen/Qwen2.5-0.5B",
+    dtype="int4",
+    use_list=False,
+)
+```
+
+The shortcut stores matching weights as Qwix arrays while model computation
+uses BF16 by default. Use `quant=` for selective rules; see
+[Models and Checkpoints](models_and_checkpoints.md#quantized-loading).
+
+## Verify the Checkout
+
+The offline suite uses tiny deterministic fixtures:
+
+```bash
+uv run pytest
+```
+
+It covers checkpoint mappings, model parity, cached decoding, training,
+serialization, PEFT, data operations, kernel entry points, and runtime
+interfaces without downloading pretrained weights.

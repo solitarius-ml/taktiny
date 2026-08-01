@@ -1,83 +1,137 @@
-# Core Concepts in TakTiny
+# Core Concepts
 
-TakTiny bridges object-oriented Python design with JAX's functional transformation model. This page explains key architectural concepts.
+## Modules and Parameters
 
----
-
-## 1. Object-Oriented JAX Modules (`nn.Module`)
-
-In TakTiny, neural network components inherit from `nn.Module`. Unlike standard Flax or PyTorch modules, TakTiny modules manage state and parameters cleanly while remaining 100% compatible with JAX transformations (`jax.jit`, `jax.vmap`, `jax.grad`, `jax.eval_shape`).
-
-### Parameter Initialization
-Parameters are declared using TakTiny's initializers and stored on module instances:
+`nn.Module` subclasses are registered JAX PyTrees. Array state is normally held
+inside `nn.Parameter`, while ordinary Python attributes are static PyTree
+metadata.
 
 ```python
-from taktiny import nn
+import jax
 import jax.numpy as jnp
 
-class MyLinear(nn.Module):
-    def __init__(self, in_features: int, out_features: int, rngs: nn.Rngs):
-        self.in_features = in_features
-        self.out_features = out_features
-        # Parameter registered as a PyTree leaf
+from taktiny import nn
+
+
+class Projection(nn.Module):
+    def __init__(self, in_features, out_features, *, rngs):
         self.weight = nn.Parameter(
             jax.random.normal(rngs(), (in_features, out_features)) * 0.02
         )
 
     def __call__(self, x):
-        return jnp.dot(x, self.weight.value)
+        return jnp.matmul(x, self.weight.value)
+
+
+module = Projection(8, 4, rngs=nn.Rngs(42))
+output = jax.jit(module)(jnp.ones((2, 8)))
 ```
 
----
+Common state helpers are:
 
-## 2. PRNG Key Management (`nn.Rngs`)
+```python
+flat_parameters = module.flat_parameter_dict()
+flat_arrays = module.flat_state_dict()
+nested_state = module.state_dict()
+module.load_state_dict(nested_state)
+```
 
-Random number generator (PRNG) state management is handled through `nn.Rngs`. Passing an `nn.Rngs` instance enables reproducible parameter initializations and dropout generation:
+The parameter dictionaries contain references to existing `Parameter` objects;
+creating them does not copy every weight array.
+
+## Random Keys
+
+`nn.Rngs` owns one JAX PRNG key. Each call advances the stream and returns a
+new subkey.
 
 ```python
 from taktiny import nn
 
-# Initialize Rngs with an integer seed or JAX key
 rngs = nn.Rngs(42)
-
-# Calling rngs() splits the internal key and returns a new subkey
-key1 = rngs()
-key2 = rngs()
+initialization_key = rngs()
+dropout_key = rngs()
+current_key = rngs.key
 ```
 
----
+Generation accepts an integer `seed`. The trainer maintains its own `nn.Rngs`
+stream and saves it in resumable checkpoints.
 
-## 3. Sharding & Parallelism Modes (`ShardMode`)
+## Module Containers
 
-TakTiny supports explicit and automatic device mesh sharding via `ShardMode`:
+`nn.List` stores independent module instances and executes no transformation
+by itself.
 
-- **`ShardMode.AUTO`**: Lets JAX auto-shard tensors across available devices.
-- **`ShardMode.EXPLICIT`**: Uses logical-to-mesh axis mapping rules (e.g. Tensor Parallelism `'tp'`, FSDP `'fsdp'`).
+`nn.SeqStack` stacks matching module leaves along a leading layer axis. Its
+call receives a scan body and executes layers sequentially with
+`jax.lax.scan`. Every module must have the same PyTree structure. Per-layer
+values that vary, such as Gemma3 local/full attention settings, must therefore
+be array leaves rather than different static metadata.
 
-### Explicit Device Mesh Sharding
+`nn.Stack` uses `jax.vmap` to apply stacked modules independently. It is not a
+decoder loop because vectorized calls do not feed one layer's result into the
+next.
+
+`nn.Sequential` calls ordinary modules in order without stacking their
+parameters.
+
+## Decoder Execution
+
+`TransformerModel` embeds integer token IDs and runs
+`config.num_hidden_layers` decoder blocks. `use_list=True` selects `nn.List`;
+`use_list=False` selects `nn.SeqStack`.
+
+`TransformerContext` carries KV caches, cached position state, and the causal
+flag. Most users interact with it indirectly through `generate` or
+`stream_generate`.
+
+Packed sequences pass two-dimensional `position_ids`. A reset to zero marks a
+new example, allowing attention to derive segment boundaries without storing a
+quadratic block-diagonal mask in the dataloader.
+
+## Sharding
+
+Parameters carry logical axis names such as `vocab`, `embed`, `heads`, `mlp`,
+and `batch`. Passing a JAX `Mesh` plus logical-to-mesh rules to
+`Maestro.from_pretrained` places checkpoint arrays with matching
+`NamedSharding` values.
+
 ```python
 import jax
 from jax.sharding import Mesh
-from jax.experimental import mesh_utils
-from taktiny import nn, ShardMode
 
-# Define 2D Device Mesh (2 FSDP x 4 TP)
-devices = mesh_utils.create_device_mesh((2, 4))
-mesh = Mesh(devices, ('fsdp', 'tp'))
+from taktiny import Maestro
 
-# Specify model with explicit sharding rules
-model = MyModel(config, rngs=rngs, mesh=mesh, shard_mode=ShardMode.EXPLICIT)
+devices = jax.devices()
+mesh = Mesh(devices, ("fsdp",))
+
+model = Maestro.from_pretrained(
+    "Qwen/Qwen2.5-0.5B",
+    mesh=mesh,
+    sharding_rules=[
+        ("batch", "fsdp"),
+        ("vocab", "fsdp"),
+        ("embed", None),
+        ("heads", None),
+        ("kv_heads", None),
+        ("head_dim", None),
+        ("mlp", None),
+    ],
+)
 ```
 
----
+The mesh shape must match the available device count. Sharding reduces
+per-device storage only when a parameter axis is mapped across multiple
+devices.
 
-## 4. Context-Wide Rematerialization (`enable_remat`)
+## Rematerialization
 
-Gradient rematerialization (activation checkpointing) reduces VRAM usage during backward passes by recomputing intermediate activations instead of storing them:
+Implemented causal models expose `enable_remat()`:
 
 ```python
-model = TransformerCausalLM(config, rngs=rngs, decoder=LlamaDecoderLayer)
-
-# Enable rematerialization across all decoder layers
 model.enable_remat()
 ```
+
+This checkpoints decoder-layer computation during gradient evaluation,
+trading additional computation for lower activation memory. It does not reduce
+parameter, optimizer-state, or KV-cache storage, and it is intentionally
+configured on the model rather than through `TrainingConfig`.
