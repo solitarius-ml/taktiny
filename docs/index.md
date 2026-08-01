@@ -1,27 +1,56 @@
-# TakTiny Documentation
+# Taktiny Documentation
 
-Welcome to the documentation for **TakTiny**, a high-performance Deep Learning framework built on JAX. TakTiny features object-oriented modeling semantics, high-performance custom kernels, unified multimodal conditional generation, and zero-allocation model shape evaluation.
+Taktiny is an experimental neural-network library built directly on JAX. It
+provides object-oriented modules that are JAX PyTrees, transformer building
+blocks, Hugging Face Safetensors loading, Qwix weight-only quantization, PEFT,
+and an Optax-based training loop.
 
----
+The project is under active development. APIs and model coverage can change
+between revisions.
 
-## Key Highlights
+## Current Scope
 
-- **Object-Oriented JAX Modeling**: Clean, modular `nn.Module` classes with automatic state and PRNG key handling via `nn.Rngs`.
-- **Zero-Allocation Shape Inspection**: Abstractly inspect massive models (such as Gemma 4 12B or Llama 4) with `Maestro.eval_shape` without downloading or allocating physical GPU/TPU memory.
-- **High-Performance Custom Kernels**: Custom Pallas, Mosaic, and Triton kernels for FlashAttention, SplashAttention, RingAttention, Megablox Grouped Matrix Multiply (GMM), activation routing/sorting, and SparseCore gather-reduce.
-- **Unified Multimodal Conditional Generation**: The `TransformerConditionalGeneration` base class unifies text, vision, and audio encoder integration, multimodal embedding fusion, and KV-cache autoregressive generation.
-- **Flexible Sharding & Rematerialization**: Native support for tensor-parallel and FSDP mesh sharding via `ShardMode` and context-wide gradient rematerialization with `enable_remat()`.
-- **PEFT & Training Lifecycle**: Built-in Parameter-Efficient Fine-Tuning with LoRA (`LoraConfig`) and end-to-end training via `Takt`.
+- `nn.Module` and `nn.Parameter` objects compatible with JAX transformations
+- Causal language models with KV-cached generation and streaming
+- Hugging Face configuration and checkpoint loading through `Maestro`
+- Full-model and LoRA-adapter Safetensors serialization
+- Qwix INT8, INT4, NF4, and selective PTQ while loading
+- Logical parameter axes, JAX mesh placement, and decoder rematerialization
+- Grain-compatible data operations and resumable trainer checkpoints
+- Low-level attention, MoE, ragged, and SparseCore kernel entry points
 
----
+The implemented causal model families are Llama, original Qwen, Qwen2,
+Qwen3, Gemma, Gemma2, and text-only Gemma3. Other architecture names in the
+internal registry are development placeholders and are not supported merely
+because they are registered.
 
-## Documentation Navigation
+Multimodal generation, native Taktiny execution through vLLM TPU, and concrete
+RL algorithms remain experimental or incomplete. Their current boundaries are
+documented explicitly rather than presented as production features.
 
-- [Getting Started](getting_started.md): Installation, quickstart guide, and 5-minute practical examples.
-- [Core Concepts](core_concepts.md): Design philosophy, state management with `nn.Rngs`, sharding, and rematerialization.
-- [Maestro Architectures](maestro_architectures.md): Architectural registry (`repertoire`), `eval_shape`, `from_pretrained`, and supported model families.
-- [Layers & Neural Networks](layers_and_nn.md): Neural network primitives (`Linear`, `Embedding`, `RMSNorm`), containers (`SeqStack`, `List`), and layers (`Attention`, `MoeFFN`, `GateMLP`).
-- [Custom Kernels](custom_kernels.md): Custom JAX/Pallas kernels and classmethod entry points (`Attention.apply`, `MoeFFN.apply_gmm`).
-- [Multimodal Generation](multimodal_generation.md): `TransformerConditionalGeneration`, vision/audio feature encoding, embedding fusion, and generation.
-- [PEFT & Training](peft_and_training.md): Fine-tuning with LoRA (`LoraConfig`) and full-lifecycle training with `Takt`.
-- [API Reference](api_reference.md): Complete index of symbols, modules, and classes.
+## Documentation
+
+- [Getting Started](getting_started.md): install, load, inspect, and generate
+- [Core Concepts](core_concepts.md): modules, parameters, RNGs, stacks, sharding,
+  and rematerialization
+- [Models and Checkpoints](models_and_checkpoints.md): Maestro, implemented
+  families, quantized loading, serialization, and Hub upload
+- [Generation](generation.md): native batched generation, sampling, streaming,
+  and forward contexts
+- [Data Pipelines](data.md): Grain composition, batched tokenization, packing,
+  workers, and resume boundaries
+- [Training](training.md): losses, Optax, gradient controls, evaluation,
+  callbacks, sharding, checkpointing, and resume
+- [PEFT](peft.md): LoRA, QLoRA-style loading, adapter checkpoints, and merging
+- [Layers](layers.md): primitives, transformer layers, containers, and module
+  transformations
+- [Kernels](kernels.md): attention, MoE, embedding entry points, and hardware
+  constraints
+- [Experimental APIs](experimental.md): accurate multimodal, vLLM, RL, and
+  architecture-placeholder boundaries
+- [API Reference](api_reference.md): compact signatures and symbols by module
+
+## Version Note
+
+These pages describe the latest `experiment` implementation, not the older
+source snapshot carried by the documentation worktree itself.
