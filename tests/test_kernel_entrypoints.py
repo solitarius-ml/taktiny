@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from taktiny import nn
 from taktiny.kernels.attention.flash_attention import (
     flash_attention_block_masked,
 )
@@ -89,6 +90,45 @@ def test_attention_kernel_entry_matches_dot_product_gqa(
     )
 
     assert actual.shape == query.shape
+    assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_attention_derives_packed_boundaries_from_position_ids():
+    attention = Attention(
+        hidden_size=8,
+        num_heads=2,
+        head_dim=4,
+        dtype='float32',
+        rngs=nn.Rngs(0),
+    )
+    hidden_states = jax.random.normal(jax.random.key(4), (2, 4, 8))
+    position_ids = jnp.asarray([
+        [0, 1, 0, 1],
+        [0, 0, 1, 0],
+    ])
+    packed_segments = jnp.cumsum(position_ids == 0, axis=-1)
+    causal = jnp.tril(jnp.ones((4, 4), dtype=jnp.bool_))
+    dense_mask = (
+        packed_segments[:, None, :, None]
+        == packed_segments[:, None, None, :]
+    ) & causal
+
+    actual, _ = attention(
+        hidden_states,
+        position_idx=position_ids,
+        is_causal=True,
+    )
+    query = attention.q_proj(hidden_states)
+    key = attention.k_proj(hidden_states)
+    value = attention.v_proj(hidden_states)
+    expected = jax.nn.dot_product_attention(
+        query,
+        key,
+        value,
+        mask=dense_mask,
+    )
+    expected = attention.o_proj(expected)
+
     assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
 
 

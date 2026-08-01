@@ -117,7 +117,6 @@ def make_trainer(
     ) else RLBaseTrainer
     return trainer_type(
         model,
-        loss_fn,
         TrainingConfig(
             max_steps=max_steps,
             learning_rate=0.1,
@@ -128,6 +127,7 @@ def make_trainer(
             [prompt_batch(index) for index in range(batch_count)],
             prefetch_size=prefetch_size,
         ),
+        loss_fn=loss_fn,
         runtime=runtime,
     )
 

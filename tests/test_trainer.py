@@ -26,7 +26,6 @@ from taktiny.trainer import (
     WandbCallback,
 )
 from taktiny.trainer.trainer import (
-    _GrainEpochLoader,
     _format_iteration_time,
     _parameter_labels,
     _partition_params,
@@ -262,7 +261,6 @@ def test_trainer_updates_only_trainable_parameters(jit_compile):
     ]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             learning_rate=0.1,
@@ -270,6 +268,7 @@ def test_trainer_updates_only_trainable_parameters(jit_compile):
             jit_compile=jit_compile,
         ),
         DatasetConfig(batches, prefetch_size=2),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -281,9 +280,9 @@ def test_trainer_updates_only_trainable_parameters(jit_compile):
 def test_trainer_rejects_empty_dataloader():
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(),
         DatasetConfig([], prefetch_size=1),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(
@@ -304,7 +303,6 @@ def test_trainer_saves_by_step_and_rotates_checkpoints(tmp_path):
     ]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=5,
             learning_rate=0.1,
@@ -316,6 +314,7 @@ def test_trainer_saves_by_step_and_rotates_checkpoints(tmp_path):
             max_shard_size='1GB',
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -383,7 +382,6 @@ def test_trainer_does_not_duplicate_scheduled_final_checkpoint(tmp_path):
     ]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=4,
             output_dir=tmp_path,
@@ -391,6 +389,7 @@ def test_trainer_does_not_duplicate_scheduled_final_checkpoint(tmp_path):
             save_at_end=True,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -409,9 +408,9 @@ def test_trainer_does_not_duplicate_scheduled_final_checkpoint(tmp_path):
 def test_rng_state_round_trips_without_advancing_on_save(tmp_path):
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(seed=123),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
     trainer.rngs()
     trainer._save_rng_state(tmp_path)
@@ -419,9 +418,9 @@ def test_rng_state_round_trips_without_advancing_on_save(tmp_path):
 
     restored = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(seed=999),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
     assert restored._restore_rng_state(tmp_path)
 
@@ -440,12 +439,12 @@ def test_loss_function_can_receive_trainer_rng():
 
     trainer = Trainer(
         TinyModel(),
-        stochastic_loss,
         TrainingConfig(max_steps=1, jit_compile=False),
         DatasetConfig([{
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }]),
+        loss_fn=stochastic_loss,
     )
     trainer.train()
 
@@ -465,9 +464,9 @@ def test_evaluation_uses_separate_rng_for_stochastic_loss(jit_compile):
     }
     trainer = Trainer(
         TinyModel(),
-        stochastic_loss,
         TrainingConfig(jit_compile=jit_compile, seed=7),
         DatasetConfig([], validation_dataloader=[batch]),
+        loss_fn=stochastic_loss,
     )
     training_key_before = jax.random.key_data(trainer.rngs.key)
 
@@ -492,7 +491,6 @@ def test_async_checkpoint_uses_stable_snapshot_and_publishes_atomically(
     } for _ in range(2)]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             learning_rate=0.1,
@@ -502,6 +500,7 @@ def test_async_checkpoint_uses_stable_snapshot_and_publishes_atomically(
             save_optimizer_state=False,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -521,7 +520,6 @@ def test_async_checkpoint_uses_stable_snapshot_and_publishes_atomically(
 def test_failed_checkpoint_never_publishes_partial_directory(tmp_path):
     trainer = Trainer(
         FailingSavingTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=1,
             output_dir=tmp_path,
@@ -532,6 +530,7 @@ def test_failed_checkpoint_never_publishes_partial_directory(tmp_path):
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }]),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(RuntimeError, match='checkpoint write failed'):
@@ -546,9 +545,9 @@ def test_multihost_state_files_are_process_local(monkeypatch, tmp_path):
     monkeypatch.setattr(jax, 'process_index', lambda: 2)
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
 
     assert trainer._rng_state_path(tmp_path).endswith(
@@ -581,12 +580,12 @@ def test_multihost_checkpoint_coordinates_publication(
     monkeypatch.setattr(ocp, 'StandardCheckpointer', FakeCheckpointer)
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(
             output_dir=tmp_path,
             save_optimizer_state=False,
         ),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
     barriers = []
     trainer._sync_hosts = barriers.append
@@ -632,13 +631,13 @@ def test_trainer_records_log_interval_and_final_history():
     ]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=5,
             learning_rate=0.1,
             log_interval=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -664,7 +663,6 @@ def test_default_optimizer_uses_and_logs_schedule():
     model = TinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=3,
             learning_rate=10.0,
@@ -678,6 +676,7 @@ def test_default_optimizer_uses_and_logs_schedule():
             }
             for _ in range(3)
         ], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -697,7 +696,6 @@ def test_custom_optimizer_schedule_is_logged():
     )
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(schedule),
@@ -711,6 +709,7 @@ def test_custom_optimizer_schedule_is_logged():
             }
             for _ in range(2)
         ], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -724,7 +723,6 @@ def test_custom_optimizer_schedule_is_logged():
 def test_custom_optimizer_without_schedule_logs_unknown_rate():
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(0.1),
@@ -734,6 +732,7 @@ def test_custom_optimizer_without_schedule_logs_unknown_rate():
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -749,7 +748,6 @@ def test_trainer_dispatches_callback_events_in_order(tmp_path):
     }]
     trainer = Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=1,
             log_interval=1,
@@ -763,6 +761,7 @@ def test_trainer_dispatches_callback_events_in_order(tmp_path):
             validation_dataloader=batches,
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
         callbacks=callback,
     )
 
@@ -800,12 +799,12 @@ def test_partial_callback_and_callback_registration():
     callback = LogCallback()
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(max_steps=1, log_interval=1),
         DatasetConfig([{
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     )
     assert trainer.add_callback(callback) is callback
 
@@ -833,13 +832,13 @@ def test_custom_metrics_are_averaged_and_prefixed():
     ]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(),
         DatasetConfig(
             [],
             validation_dataloader=batches,
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
         compute_metrics=absolute_error_metrics,
     )
 
@@ -875,7 +874,6 @@ def test_custom_metrics_are_averaged_and_prefixed():
 def test_custom_metrics_validate_results(compute_metrics, error, message):
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(),
         DatasetConfig(
             [],
@@ -885,6 +883,7 @@ def test_custom_metrics_validate_results(compute_metrics, error, message):
             }],
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
         compute_metrics=compute_metrics,
     )
 
@@ -900,7 +899,6 @@ def test_custom_metrics_require_consistent_names():
 
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(),
         DatasetConfig(
             [],
@@ -916,6 +914,7 @@ def test_custom_metrics_require_consistent_names():
             ],
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
         compute_metrics=inconsistent_metrics,
     )
 
@@ -932,7 +931,6 @@ def test_tensorboard_callback_reports_training_and_evaluation(tmp_path):
     }]
     trainer = Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=1,
             log_interval=1,
@@ -946,6 +944,7 @@ def test_tensorboard_callback_reports_training_and_evaluation(tmp_path):
             validation_dataloader=batches,
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
         callbacks=[callback],
         compute_metrics=absolute_error_metrics,
     )
@@ -994,12 +993,12 @@ def test_wandb_callback_reports_logs():
     run = FakeWandbRun()
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(max_steps=1, log_interval=1),
         DatasetConfig([{
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
         callbacks=[WandbCallback(run=run)],
     )
 
@@ -1063,9 +1062,9 @@ def test_trainer_validates_reporting_hooks(kwargs):
     with pytest.raises(TypeError):
         Trainer(
             TinyModel(),
-            squared_error,
             TrainingConfig(),
             DatasetConfig([]),
+            loss_fn=squared_error,
             **kwargs,
         )
 
@@ -1075,7 +1074,6 @@ def test_gradient_accumulation_matches_larger_batch(jit_compile):
     combined_model = TinyModel()
     Trainer(
         combined_model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(0.1),
@@ -1086,12 +1084,12 @@ def test_gradient_accumulation_matches_larger_batch(jit_compile):
             'x': np.asarray([1.0, 2.0], dtype=np.float32),
             'y': np.asarray([2.0, 4.0], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
 
     accumulated_model = TinyModel()
     trainer = Trainer(
         accumulated_model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(0.1),
@@ -1109,6 +1107,7 @@ def test_gradient_accumulation_matches_larger_batch(jit_compile):
                 'y': np.asarray([4.0], dtype=np.float32),
             },
         ], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1126,7 +1125,6 @@ def test_gradient_accumulation_flushes_partial_epoch_window():
     model = TinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             optimizer=optax.sgd(0.1),
             log_interval=10,
@@ -1139,6 +1137,7 @@ def test_gradient_accumulation_flushes_partial_epoch_window():
             }
             for _ in range(3)
         ], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1152,7 +1151,6 @@ def test_global_gradient_clipping_limits_update_norm():
     model = TinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(1.0),
@@ -1163,6 +1161,7 @@ def test_global_gradient_clipping_limits_update_norm():
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([100.0], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1176,7 +1175,6 @@ def test_non_finite_gradient_skips_update(bad_value):
     model = TinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(1.0),
@@ -1186,6 +1184,7 @@ def test_non_finite_gradient_skips_update(bad_value):
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([bad_value], dtype=np.float32),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1202,7 +1201,6 @@ def test_dynamic_loss_scaling_recovers_after_non_finite_gradient():
     model = TinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(0.1),
@@ -1221,6 +1219,7 @@ def test_dynamic_loss_scaling_recovers_after_non_finite_gradient():
                 'y': np.asarray([2.0], dtype=np.float32),
             },
         ], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1237,7 +1236,6 @@ def test_fixed_loss_scaling_updates_fp16_parameter():
     model.weight.value = jnp.asarray(0.0, dtype=jnp.float16)
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(0.1),
@@ -1248,6 +1246,7 @@ def test_fixed_loss_scaling_updates_fp16_parameter():
             'x': np.asarray([1.0], dtype=np.float16),
             'y': np.asarray([2.0], dtype=np.float16),
         }], prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1261,7 +1260,6 @@ def test_trainer_can_disable_optimizer_state_saving(tmp_path):
     model = SavingTinyModel()
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             output_dir=tmp_path,
@@ -1272,6 +1270,7 @@ def test_trainer_can_disable_optimizer_state_saving(tmp_path):
             'x': np.asarray([1.0], dtype=np.float32),
             'y': np.asarray([2.0], dtype=np.float32),
         }]),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1292,19 +1291,18 @@ def test_trainer_resume_matches_uninterrupted_training(tmp_path):
     control = CheckpointTinyModel()
     Trainer(
         control,
-        squared_error,
         TrainingConfig(
             max_steps=4,
             learning_rate=0.1,
             log_interval=1,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
 
     first_model = CheckpointTinyModel()
     first_trainer = Trainer(
         first_model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             learning_rate=0.1,
@@ -1313,13 +1311,13 @@ def test_trainer_resume_matches_uninterrupted_training(tmp_path):
             save_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
     first_trainer.train()
 
     resumed_model = CheckpointTinyModel()
     resumed_trainer = Trainer(
         resumed_model,
-        squared_error,
         TrainingConfig(
             max_steps=4,
             learning_rate=0.1,
@@ -1328,6 +1326,7 @@ def test_trainer_resume_matches_uninterrupted_training(tmp_path):
             save_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
     resumed_trainer.train(resume_from_checkpoint='latest')
 
@@ -1358,7 +1357,6 @@ def test_trainer_resume_preserves_accumulation_boundaries(tmp_path):
     control = CheckpointTinyModel()
     Trainer(
         control,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(0.1),
@@ -1366,12 +1364,12 @@ def test_trainer_resume_preserves_accumulation_boundaries(tmp_path):
             gradient_accumulation_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
 
     first_model = CheckpointTinyModel()
     Trainer(
         first_model,
-        squared_error,
         TrainingConfig(
             max_steps=1,
             optimizer=optax.sgd(0.1),
@@ -1381,12 +1379,12 @@ def test_trainer_resume_preserves_accumulation_boundaries(tmp_path):
             gradient_accumulation_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
 
     resumed_model = CheckpointTinyModel()
     resumed_trainer = Trainer(
         resumed_model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(0.1),
@@ -1396,6 +1394,7 @@ def test_trainer_resume_preserves_accumulation_boundaries(tmp_path):
             gradient_accumulation_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
     resumed_trainer.train(resume_from_checkpoint='latest')
 
@@ -1422,17 +1421,16 @@ def test_trainer_resume_rejects_changed_accumulation_steps(tmp_path):
     }]
     Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=1,
             output_dir=tmp_path,
             save_steps=1,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
     trainer = Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=2,
             output_dir=tmp_path,
@@ -1440,6 +1438,7 @@ def test_trainer_resume_rejects_changed_accumulation_steps(tmp_path):
             gradient_accumulation_steps=2,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(ValueError, match='gradient_accumulation_steps'):
@@ -1461,13 +1460,13 @@ def test_trainer_checkpoints_and_restores_iterator_state(
     control = CheckpointTinyModel()
     Trainer(
         control,
-        squared_error,
         TrainingConfig(
             max_steps=4,
             optimizer=optax.sgd(0.1),
             log_interval=1,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=squared_error,
     ).train()
 
     first_loader = StatefulLoader(
@@ -1476,7 +1475,6 @@ def test_trainer_checkpoints_and_restores_iterator_state(
     )
     Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(0.1),
@@ -1485,6 +1483,7 @@ def test_trainer_checkpoints_and_restores_iterator_state(
             save_steps=2,
         ),
         DatasetConfig(first_loader, prefetch_size=3),
+        loss_fn=squared_error,
     ).train()
 
     state_suffix = 'bin' if state_format == 'bytes' else 'json'
@@ -1504,7 +1503,6 @@ def test_trainer_checkpoints_and_restores_iterator_state(
     )
     resumed_trainer = Trainer(
         resumed_model,
-        squared_error,
         TrainingConfig(
             max_steps=4,
             optimizer=optax.sgd(0.1),
@@ -1513,6 +1511,7 @@ def test_trainer_checkpoints_and_restores_iterator_state(
             save_steps=2,
         ),
         DatasetConfig(resumed_loader, prefetch_size=3),
+        loss_fn=squared_error,
     )
     resumed_trainer.train(resume_from_checkpoint='latest')
 
@@ -1535,13 +1534,13 @@ def test_trainer_calls_epoch_hook_on_passed_dataloader():
     loader = EpochAwareLoader(batches)
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(
             epochs=2,
             optimizer=optax.sgd(0.1),
             log_interval=10,
         ),
         DatasetConfig(loader, prefetch_size=0),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1597,7 +1596,6 @@ def test_trainer_resume_applies_saved_adapter_to_base_model(tmp_path):
     )
     Trainer(
         adapted_model,
-        projection_error,
         TrainingConfig(
             max_steps=1,
             learning_rate=0.1,
@@ -1606,12 +1604,12 @@ def test_trainer_resume_applies_saved_adapter_to_base_model(tmp_path):
             save_steps=1,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=projection_error,
     ).train()
 
     resumed_model = AdapterTrainingModel()
     resumed_trainer = Trainer(
         resumed_model,
-        projection_error,
         TrainingConfig(
             max_steps=2,
             learning_rate=0.1,
@@ -1620,6 +1618,7 @@ def test_trainer_resume_applies_saved_adapter_to_base_model(tmp_path):
             save_steps=1,
         ),
         DatasetConfig(batches, prefetch_size=0),
+        loss_fn=projection_error,
     )
     resumed_trainer.train(resume_from_checkpoint='latest')
 
@@ -1635,9 +1634,9 @@ def test_trainer_resume_applies_saved_adapter_to_base_model(tmp_path):
 def test_trainer_resume_latest_requires_checkpoint(tmp_path):
     trainer = Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(output_dir=tmp_path),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(FileNotFoundError, match='No checkpoint'):
@@ -1652,7 +1651,6 @@ def test_step_evaluation_loads_and_preserves_best_checkpoint(tmp_path):
     } for _ in range(2)]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             max_steps=2,
             optimizer=optax.sgd(1.5),
@@ -1668,6 +1666,7 @@ def test_step_evaluation_loads_and_preserves_best_checkpoint(tmp_path):
             validation_dataloader=batches,
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1700,7 +1699,6 @@ def test_epoch_evaluation_records_each_completed_epoch():
     }]
     trainer = Trainer(
         model,
-        squared_error,
         TrainingConfig(
             epochs=2,
             learning_rate=0.1,
@@ -1712,6 +1710,7 @@ def test_epoch_evaluation_records_each_completed_epoch():
             validation_dataloader=batches,
             prefetch_size=0,
         ),
+        loss_fn=squared_error,
     )
 
     trainer.train()
@@ -1735,12 +1734,12 @@ def test_epoch_evaluation_records_each_completed_epoch():
 def test_trainer_requires_validation_data_for_eval():
     trainer = Trainer(
         CheckpointTinyModel(),
-        squared_error,
         TrainingConfig(
             eval_strategy='steps',
             eval_steps=1,
         ),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(ValueError, match='validation_dataloader'):
@@ -1750,12 +1749,12 @@ def test_trainer_requires_validation_data_for_eval():
 def test_trainer_rejects_saving_for_unsupported_model(tmp_path):
     trainer = Trainer(
         TinyModel(),
-        squared_error,
         TrainingConfig(
             output_dir=tmp_path,
             save_steps=1,
         ),
         DatasetConfig([]),
+        loss_fn=squared_error,
     )
 
     with pytest.raises(TypeError, match='does not support save_pretrained'):
@@ -1864,197 +1863,9 @@ def test_training_configuration_validation(factory):
         factory()
 
 
-def test_dataset_config_requires_dataloader_or_repo():
+def test_dataset_config_requires_train_dataloader():
     with pytest.raises(
-        ValueError,
-        match='repo_id is required when dataloader is not provided',
+        TypeError,
+        match='train_dataloader is required',
     ):
         DatasetConfig()
-
-
-def test_dataset_config_hides_hf_token_from_repr():
-    config = DatasetConfig(
-        repo_id='owner/gated',
-        hf_token='secret-token',
-    )
-
-    assert 'secret-token' not in repr(config)
-
-
-def test_passed_dataloader_bypasses_repo_processing():
-    batches = [{'x': np.asarray([1.0])}]
-
-    def unexpected_process(_):
-        raise AssertionError('process_fn must not run for a passed dataloader')
-
-    trainer = Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(
-            dataloader=batches,
-            repo_id='unused/repo',
-            process_fn=unexpected_process,
-            streaming=True,
-            hf_token='unused',
-        ),
-    )
-
-    assert trainer._train_dataloader is batches
-    assert trainer._validation_dataloader is None
-
-
-def test_repo_dataset_prefers_environment_token(monkeypatch):
-    loaded = {'train': [{'x': 1}], 'validation': [{'x': 2}]}
-    calls = []
-    processed = []
-
-    def load_dataset(repo_id, **kwargs):
-        calls.append((repo_id, kwargs))
-        return loaded
-
-    def process_fn(dataset):
-        processed.append(dataset)
-        return dataset
-
-    monkeypatch.setenv('HF_TOKEN', 'environment-token')
-    monkeypatch.setattr('datasets.load_dataset', load_dataset)
-    trainer = Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(
-            repo_id='owner/dataset',
-            process_fn=process_fn,
-            hf_token='config-token',
-            shuffle=False,
-        ),
-    )
-
-    assert calls == [(
-        'owner/dataset',
-        {'streaming': False, 'token': 'environment-token'},
-    )]
-    assert processed == [loaded]
-    assert isinstance(trainer._train_dataloader, _GrainEpochLoader)
-    assert isinstance(
-        trainer._validation_dataloader,
-        _GrainEpochLoader,
-    )
-
-
-def test_repo_dataset_uses_config_token_without_environment(monkeypatch):
-    calls = []
-
-    def load_dataset(repo_id, **kwargs):
-        calls.append((repo_id, kwargs))
-        return [{'x': 1}]
-
-    monkeypatch.delenv('HF_TOKEN', raising=False)
-    monkeypatch.setattr('datasets.load_dataset', load_dataset)
-    Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(
-            repo_id='owner/gated',
-            hf_token='config-token',
-            shuffle=False,
-        ),
-    )
-
-    assert calls == [(
-        'owner/gated',
-        {'streaming': False, 'token': 'config-token'},
-    )]
-
-
-def test_streaming_repo_dataset_bypasses_grain(monkeypatch):
-    train = iter([{'x': 1}])
-    validation = iter([{'x': 2}])
-
-    def load_dataset(repo_id, **kwargs):
-        assert repo_id == 'owner/stream'
-        assert kwargs == {'streaming': True, 'token': None}
-        return {'train': train, 'validation': validation}
-
-    monkeypatch.delenv('HF_TOKEN', raising=False)
-    monkeypatch.setattr('datasets.load_dataset', load_dataset)
-    trainer = Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(repo_id='owner/stream', streaming=True),
-    )
-
-    assert trainer._train_dataloader is train
-    assert trainer._validation_dataloader is validation
-
-
-def test_repo_process_fn_can_return_train_validation_tuple(monkeypatch):
-    source = object()
-    train = [{'x': 1}]
-    validation = [{'x': 2}]
-
-    monkeypatch.setattr(
-        'datasets.load_dataset',
-        lambda *args, **kwargs: source,
-    )
-    trainer = Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(
-            repo_id='owner/dataset',
-            process_fn=lambda dataset: (
-                train,
-                validation,
-            ) if dataset is source else None,
-            shuffle=False,
-        ),
-    )
-
-    assert trainer._train_dataloader.source is train
-    assert trainer._validation_dataloader.source is validation
-
-
-def test_repo_path_preserves_explicit_validation_dataloader(monkeypatch):
-    validation = iter([{'x': 2}])
-    monkeypatch.setattr(
-        'datasets.load_dataset',
-        lambda *args, **kwargs: [{'x': 1}],
-    )
-
-    trainer = Trainer(
-        TinyModel(),
-        lambda model, batch: model.weight.value,
-        TrainingConfig(),
-        DatasetConfig(
-            repo_id='owner/dataset',
-            validation_dataloader=validation,
-            shuffle=False,
-        ),
-    )
-
-    assert trainer._validation_dataloader is validation
-
-
-def test_grain_repo_loader_has_resumable_epoch_iterators():
-    source = list(range(20))
-    loader = _GrainEpochLoader(source, shuffle=True, seed=7)
-
-    first_iterator = iter(loader)
-    first_value = next(first_iterator)
-    state = first_iterator.get_state()
-    expected_next = next(first_iterator)
-
-    restored_iterator = iter(loader)
-    restored_iterator.set_state(state)
-    assert next(restored_iterator) == expected_next
-
-    first_epoch = [first_value, expected_next, *list(first_iterator)]
-    loader.set_epoch(1)
-    second_epoch = list(loader)
-    assert sorted(first_epoch) == source
-    assert sorted(second_epoch) == source
-    assert first_epoch != second_epoch
