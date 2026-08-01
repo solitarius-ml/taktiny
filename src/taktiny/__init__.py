@@ -27,9 +27,6 @@ from taktiny import nn, peft, kernels, layers
 from taktiny import transforms as tt
 from taktiny.trainer import (
     DatasetConfig,
-    SFTDatasetConfig,
-    SFTTrainer,
-    SFTTrainingConfig,
     TensorBoardCallback,
     Trainer,
     TrainerCallback,
@@ -51,9 +48,6 @@ __all__ = [
     'WandbCallback',
     'TrainingConfig',
     'DatasetConfig',
-    'SFTDatasetConfig',
-    'SFTTrainer',
-    'SFTTrainingConfig',
     'tt',
     'nn',
     'layers',

@@ -31,6 +31,10 @@ from typing import *
 from functools import partial
 
 
+def _approximate_gelu(x):
+    return jax.nn.gelu(x, approximate=True)
+
+
 @partial(
     jax.tree_util.register_dataclass,
     data_fields=['key_cache', 'value_cache', 'position_idx'],
@@ -53,7 +57,7 @@ class TransformerDecoderLayer(nn.Module):
     branches. Consecutive normalization modules allow architectures such as
     Gemma 2 to place norms on both sides of a residual branch.
 
-    Attention modules receive the attention mask, causal flag, position index,
+    Attention modules receive the attention mask, causal flag, position IDs,
     and optional KV cache. The returned cache has the same per-layer
     ``(key_cache, value_cache)`` structure as the input cache.
 
@@ -135,7 +139,7 @@ class TransformerDecoderLayer(nn.Module):
             or 'silu'
         )
         if hidden_act in ('gelu_pytorch_tanh', 'gelu_new', 'gelu_fast'):
-            hidden_act = partial(jax.nn.gelu, approximate=True)
+            hidden_act = _approximate_gelu
         attention_scaling = None
         query_pre_attn_scalar = getattr(config, 'query_pre_attn_scalar', None)
         if query_pre_attn_scalar is not None:
@@ -266,6 +270,7 @@ class TransformerDecoderLayer(nn.Module):
                     rope_scaling,
                 ),
                 bias=False,
+                qkv_norm_eps=eps,
                 q_bias=attention_bias,
                 k_bias=attention_bias,
                 v_bias=attention_bias,
@@ -398,7 +403,9 @@ class TransformerModel(nn.Module):
     The supplied decoder type is instantiated ``config.num_hidden_layers``
     times. Each layer owns independent parameters initialized from the shared
     RNG stream. During a forward pass, a stacked KV cache is sliced by layer and
-    rebuilt with the updated per-layer cache values.
+    rebuilt with the updated per-layer cache values. Per-token position IDs
+    are shared by all layers and preserve packed-example boundaries when they
+    reset to zero.
 
     Args:
         config: Model configuration containing ``num_hidden_layers``,
@@ -471,24 +478,13 @@ class TransformerModel(nn.Module):
                 )
             )
         else:
-            try:
-                def stacked_layers():
-                    for layer_idx in range(num_hidden_layers):
-                        layer = module(config, rngs=rngs, layer_idx=layer_idx)
-                        layer.layer_idx = None
-                        yield layer
+            def stacked_layers():
+                for layer_idx in range(num_hidden_layers):
+                    layer = module(config, rngs=rngs, layer_idx=layer_idx)
+                    layer.layer_idx = None
+                    yield layer
 
-                self.layers = nn.SeqStack(
-                    stacked_layers()
-                )
-            except Exception:
-                self.use_list = True
-                self.layers = nn.List(
-                    *(
-                        module(config, rngs=rngs, layer_idx=layer_idx)
-                        for layer_idx in range(num_hidden_layers)
-                    )
-                )
+            self.layers = nn.SeqStack(stacked_layers())
 
         self.norm = None
         if isinstance(norm, nn.Module):
@@ -658,6 +654,10 @@ class TransformerCausalLM(PretrainedModel):
     Returns:
         A tuple containing vocabulary logits and the updated
         ``TransformerContext``, or ``None`` when no context was supplied.
+
+    ``position_ids`` passed to :meth:`__call__` may contain one position per
+    token. Resetting positions to zero marks packed sequence boundaries for
+    attention kernels without requiring a dense block-diagonal mask.
     """
 
     default_sharding_rules = [
@@ -782,6 +782,7 @@ class TransformerCausalLM(PretrainedModel):
         self,
         x: jax.Array,
         attention_mask: jax.Array = None,
+        position_ids: jax.Array = None,
         ctx: TransformerContext = None,
         logits_to_keep: int | jax.Array = 0,
     ):
@@ -800,6 +801,14 @@ class TransformerCausalLM(PretrainedModel):
                 )
             if ctx.key_cache is not None:
                 kv_cache = (ctx.key_cache, ctx.value_cache)
+
+        if position_ids is not None:
+            if kv_cache is not None:
+                raise ValueError(
+                    'position_ids cannot be supplied with a KV cache; '
+                    'TransformerContext.position_idx owns cached positions'
+                )
+            position_idx = jnp.asarray(position_ids, dtype=jnp.int32)
 
         x, new_cache = self.model(
             x,
@@ -871,15 +880,23 @@ class TransformerCausalLM(PretrainedModel):
             
         tied = getattr(config, 'tie_word_embeddings', False)
         
-        new_module_map = []
-        for rule in module_map:
-            if len(rule) == 2:
-                source, target = rule
-                if tied and target == "embed_tokens.embedding":
-                    new_module_map.append((source, ["embed_tokens.embedding", "lm_head.weight"], lambda x: [x, x]))
+        new_module_map = list(module_map)
+        if tied:
+            embedding_target = None
+            for rule in module_map:
+                if len(rule) != 2:
                     continue
-
-            new_module_map.append(rule)
+                _, target = rule
+                if (
+                    isinstance(target, str)
+                    and target.endswith('embed_tokens.embedding')
+                ):
+                    embedding_target = target
+                    break
+            if embedding_target is not None:
+                new_module_map.append(
+                    ('lm_head.weight', embedding_target)
+                )
             
         return super().from_pretrained(path_or_repo, config=config, module_map=new_module_map, **kwargs)
 

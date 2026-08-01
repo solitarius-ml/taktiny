@@ -40,10 +40,13 @@ import optax
 def _is_trainable_value(value):
     if isinstance(value, qwix.QArray):
         return False
+    
     if not hasattr(value, 'dtype'):
         return False
+    
     if not jnp.issubdtype(value.dtype, jnp.inexact):
         return False
+    
     return value.dtype != getattr(jnp, 'float8_e4m3fn', None)
 
 
@@ -228,8 +231,10 @@ def _prefetch(iterable, place, size):
 def _format_iteration_time(seconds):
     if seconds < 1:
         return f'{seconds * 1000:.1f} ms/it'
+    
     if seconds < 60:
         return f'{seconds:.1f} s/it'
+    
     return f'{seconds / 60:.1f} min/it'
 
 
@@ -339,10 +344,10 @@ class Trainer:
     def __init__(
         self,
         model,
-        loss_fn,
         training_config: TrainingConfig,
         dataset_config: DatasetConfig,
         *,
+        loss_fn,
         callbacks=None,
         compute_metrics=None,
     ):
@@ -350,21 +355,16 @@ class Trainer:
         self.loss_fn = loss_fn
         self.training_config = training_config
         self.dataset_config = dataset_config
-        if dataset_config.dataloader is None:
-            (
-                self._train_dataloader,
-                self._validation_dataloader,
-            ) = _load_dataset_from_repo(dataset_config)
-        else:
-            self._train_dataloader = dataset_config.dataloader
-            self._validation_dataloader = (
-                dataset_config.validation_dataloader
-            )
+        self._train_dataloader = dataset_config.train_dataloader
+        self._validation_dataloader = dataset_config.validation_dataloader
+
         self.compute_metrics = compute_metrics
         if compute_metrics is not None and not callable(compute_metrics):
-            raise TypeError('compute_metrics must be callable or None')
+            raise TypeError('compute_metrics should be callable')
+        
         if callbacks is None:
             self.callbacks = []
+
         elif any(
             callable(getattr(callbacks, event, None))
             for event in (
@@ -375,10 +375,13 @@ class Trainer:
             )
         ):
             self.callbacks = [callbacks]
+
         else:
             self.callbacks = list(callbacks)
+
         for callback in self.callbacks:
             self._validate_callback(callback)
+
         self.model_type = self._diagnose_model_type(model)
         self._mesh = None
         self.global_step = 0
@@ -406,9 +409,11 @@ class Trainer:
             signature = inspect.signature(function)
         except (TypeError, ValueError):
             return False
+        
         parameter = signature.parameters.get('rng')
         if parameter is not None:
             return parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
+        
         return any(
             value.kind is inspect.Parameter.VAR_KEYWORD
             for value in signature.parameters.values()
@@ -433,21 +438,26 @@ class Trainer:
     def _save_rng_state(self, checkpoint_path, state=None):
         if state is None:
             state = self._capture_rng_state()
+
         state_path = self._rng_state_path(checkpoint_path)
         with open(state_path, 'w') as state_file:
             json.dump(state, state_file, indent=2)
+
         return state_path
 
     def _restore_rng_state(self, checkpoint_path):
         state_path = self._rng_state_path(checkpoint_path)
         if not os.path.isfile(state_path):
             return False
+        
         with open(state_path) as state_file:
             state = json.load(state_file)
+
         impl = state.get('impl')
         key_data = state.get('key_data')
         if not isinstance(impl, str) or not isinstance(key_data, list):
             raise ValueError('Checkpoint RNG state is invalid')
+        
         key = jax.random.wrap_key_data(
             jnp.asarray(key_data, dtype=jnp.uint32),
             impl=impl,
@@ -484,11 +494,13 @@ class Trainer:
             getattr(dataloader, 'sampler', None),
             getattr(dataloader, 'dataset', None),
         )
+
         for candidate in candidates:
             set_epoch = getattr(candidate, 'set_epoch', None)
             if callable(set_epoch):
                 set_epoch(epoch)
                 return True
+            
         return False
 
     @staticmethod
@@ -505,6 +517,7 @@ class Trainer:
             if jax.process_count() == 1
             else f'-{jax.process_index():05d}'
         )
+
         return (
             os.path.join(
                 checkpoint_path,
@@ -524,18 +537,21 @@ class Trainer:
         state = iterator.get_state()
         if isinstance(state, (bytes, bytearray, memoryview)):
             return ('bytes', bytes(state))
+        
         try:
             json.dumps(state)
         except (TypeError, ValueError) as error:
             raise TypeError(
-                'Dataloader iterator get_state() must return bytes or '
+                'Dataloader iterator get_state() should return bytes or '
                 'JSON-serializable data'
             ) from error
+        
         return ('json', state)
 
     def _save_dataloader_state(self, checkpoint_path, snapshot=None):
         if snapshot is None:
             snapshot = self._capture_dataloader_state()
+
         if snapshot is None:
             return None
 
@@ -543,34 +559,42 @@ class Trainer:
         binary_path, json_path = self._dataloader_state_paths(
             checkpoint_path
         )
+
         if state_format == 'bytes':
             with open(binary_path, 'wb') as state_file:
                 state_file.write(state)
+
             if os.path.isfile(json_path):
                 os.remove(json_path)
+
             return binary_path
 
         with open(json_path, 'w') as state_file:
             json.dump(state, state_file)
+
         if os.path.isfile(binary_path):
             os.remove(binary_path)
+
         return json_path
 
     def _restore_dataloader_state(self, iterator, checkpoint_path):
         binary_path, json_path = self._dataloader_state_paths(
             checkpoint_path
         )
+
         existing_paths = [
-            path
-            for path in (binary_path, json_path)
-            if os.path.isfile(path)
+            path for path in (binary_path, json_path) \
+                if os.path.isfile(path)
         ]
+
         if not existing_paths:
             return False
+        
         if len(existing_paths) != 1:
             raise ValueError(
                 'Resume checkpoint contains multiple dataloader states'
             )
+        
         if not self._has_iterator_state(iterator):
             return False
 
@@ -578,9 +602,11 @@ class Trainer:
         if state_path == binary_path:
             with open(state_path, 'rb') as state_file:
                 state = state_file.read()
+
         else:
             with open(state_path) as state_file:
                 state = json.load(state_file)
+
         iterator.set_state(state)
         return True
 
@@ -594,20 +620,23 @@ class Trainer:
             'on_evaluate',
             'on_train_end',
         )
+
         if not any(
             callable(getattr(callback, event, None))
             for event in events
         ):
             raise TypeError(
-                'Each callback must implement at least one Trainer event'
+                'Each callback should implement at least one Trainer event'
             )
 
     def _initial_loss_scale(self):
         loss_scale = self.training_config.loss_scale
         if loss_scale == 'dynamic':
             return float(self.training_config.initial_loss_scale)
+        
         if loss_scale is None:
             return 1.0
+        
         return float(loss_scale)
         
     def _diagnose_model_type(self, model) -> str:
@@ -634,17 +663,21 @@ class Trainer:
         if self.model_type == "taktiny":
             # Taktiny models are fully registered PyTrees
             return self.model
+        
         elif self.model_type == "nnx":
             from flax import nnx
             _, params = nnx.split(self.model)
             return params
+        
         elif self.model_type == "flax_linen":
             # Assume self.model is a dict of params for Flax Linen in this simplified design
             # (In reality, Flax Trainer would need model.init or params passed in)
             return self.model
+        
         elif self.model_type == "equinox":
             import equinox as eqx
             return eqx.filter(self.model, eqx.is_array)
+        
         else:
             raise ValueError("Unsupported model type")
             
@@ -669,7 +702,9 @@ class Trainer:
         if schedule is None:
             if self.training_config.optimizer is not None:
                 return None
+            
             return float(self.training_config.learning_rate)
+        
         value = schedule(max(0, step - 1))
         return float(jax.device_get(value))
 
@@ -678,15 +713,18 @@ class Trainer:
         if sharding is None:
             if self._mesh is None:
                 return jax.tree.map(jax.device_put, batch)
+            
             sharding = jax.sharding.NamedSharding(
                 self._mesh,
                 jax.sharding.PartitionSpec(),
             )
+
         if isinstance(sharding, jax.sharding.Sharding):
             return jax.tree.map(
                 lambda value: jax.device_put(value, sharding),
                 batch,
             )
+        
         return jax.tree.map(
             lambda value, value_sharding: jax.device_put(
                 value,
@@ -715,6 +753,7 @@ class Trainer:
             self._place_batch,
             self.dataset_config.prefetch_size,
         )
+
         for batch in batches:
             evaluation_rng, batch_rng = jax.random.split(evaluation_rng)
             if (
@@ -745,12 +784,16 @@ class Trainer:
                     batch,
                     batch_rng,
                 )
+
             elif self._loss_accepts_rng:
                 value = self.loss_fn(params, batch, rng=batch_rng)
+
             else:
                 value = self.loss_fn(params, batch)
+
             if isinstance(value, jax.Array):
                 value = value.item()
+
             losses.append(float(value))
             if self.compute_metrics is not None:
                 batch_metrics = self.compute_metrics(params, batch)
@@ -758,19 +801,23 @@ class Trainer:
                     raise TypeError(
                         'compute_metrics must return a mapping'
                     )
+                
                 batch_metric_names = set(batch_metrics)
                 if expected_metric_names is None:
                     expected_metric_names = batch_metric_names
+
                 elif batch_metric_names != expected_metric_names:
                     raise ValueError(
                         'compute_metrics must return the same metric names '
                         'for every validation batch'
                     )
+                
                 for name, metric_value in batch_metrics.items():
                     if not isinstance(name, str) or not name:
                         raise TypeError(
                             'Custom metric names must be non-empty strings'
                         )
+                    
                     metric_name = (
                         name if name.startswith('eval_') else f'eval_{name}'
                     )
@@ -778,20 +825,24 @@ class Trainer:
                         raise ValueError(
                             'compute_metrics cannot replace eval_loss'
                         )
+                    
                     metric_array = jnp.asarray(metric_value)
                     if metric_array.ndim != 0:
                         raise ValueError(
                             f'Custom metric {name!r} must be scalar'
                         )
+                    
                     metric_values.setdefault(metric_name, []).append(
                         float(jax.device_get(metric_array))
                     )
+
         batches.close()
 
         if not losses:
             raise ValueError(
                 'validation_dataloader produced no evaluation batches'
             )
+        
         metrics = {
             'eval_loss': sum(losses) / len(losses),
         }
@@ -799,6 +850,7 @@ class Trainer:
             name: sum(values) / len(values)
             for name, values in metric_values.items()
         })
+
         return metrics
 
     def evaluate(self):
@@ -830,14 +882,17 @@ class Trainer:
         metric_name = self.training_config.metric_for_best_model
         if not metric_name.startswith('eval_'):
             metric_name = f'eval_{metric_name}'
+
         if metric_name not in metrics:
             raise ValueError(
                 f'Evaluation did not produce metric {metric_name!r}'
             )
+        
         metric = float(metrics[metric_name])
         greater_is_better = self.training_config.greater_is_better
         if greater_is_better is None:
             greater_is_better = not metric_name.endswith('loss')
+
         is_best = (
             self.best_metric is None
             or (
@@ -846,10 +901,12 @@ class Trainer:
                 else metric < self.best_metric
             )
         )
+
         if is_best:
             self.best_metric = metric
             self._best_step = step
             self.best_model_checkpoint = None
+
         self._call_event('on_log', logs=dict(record))
         self._call_event('on_evaluate', metrics=dict(record))
         return metrics, is_best
@@ -871,6 +928,7 @@ class Trainer:
             match = checkpoint_pattern.fullmatch(entry.name)
             if entry.is_dir() and match is not None:
                 checkpoints.append((int(match.group(1)), entry.path))
+
         checkpoints.sort()
         return checkpoints
 
@@ -887,18 +945,22 @@ class Trainer:
         retained = set()
         if self.best_model_checkpoint in available_paths:
             retained.add(self.best_model_checkpoint)
+
         remaining = max(0, limit - len(retained))
         for _, checkpoint_path in reversed(checkpoints):
             if checkpoint_path in retained:
                 continue
+
             if remaining == 0:
                 break
+
             retained.add(checkpoint_path)
             remaining -= 1
 
         for _, checkpoint_path in checkpoints:
             if checkpoint_path in retained:
                 continue
+
             shutil.rmtree(checkpoint_path)
         self.saved_checkpoints = [
             path
@@ -913,6 +975,7 @@ class Trainer:
                 raise FileNotFoundError(
                     f'Resume checkpoint was not found: {checkpoint_path}'
                 )
+            
             return checkpoint_path
 
         if self.training_config.output_dir is None:
@@ -924,6 +987,7 @@ class Trainer:
             raise FileNotFoundError(
                 'No checkpoint-* directories were found in output_dir'
             )
+        
         return checkpoints[-1][1]
 
     def _load_resume_state(self, checkpoint_path):
@@ -931,10 +995,12 @@ class Trainer:
             checkpoint_path,
             'trainer_state.json',
         )
+
         if not os.path.isfile(trainer_state_path):
             raise FileNotFoundError(
                 f'Trainer state was not found: {trainer_state_path}'
             )
+        
         with open(trainer_state_path) as trainer_state_file:
             state = json.load(trainer_state_file)
 
@@ -944,11 +1010,13 @@ class Trainer:
                 raise ValueError(
                     f'trainer_state.json has invalid {key}: {value!r}'
                 )
+            
         history = state.get('log_history', [])
         if not isinstance(history, list):
             raise ValueError(
                 'trainer_state.json log_history must be a list'
             )
+        
         accumulation_steps = state.get('gradient_accumulation_steps', 1)
         if accumulation_steps != (
             self.training_config.gradient_accumulation_steps
@@ -963,12 +1031,14 @@ class Trainer:
                 raise ValueError(
                     f'trainer_state.json has invalid {key}: {value!r}'
                 )
+            
         loss_scale = state.get('loss_scale', self._initial_loss_scale())
         if not isinstance(loss_scale, (int, float)) or loss_scale <= 0:
             raise ValueError(
                 'trainer_state.json has invalid loss_scale: '
                 f'{loss_scale!r}'
             )
+        
         return state
 
     def _load_checkpoint_model(self, checkpoint_path):
@@ -984,6 +1054,7 @@ class Trainer:
                     'Distributed model-state checkpoints currently require '
                     'a Taktiny Module'
                 )
+            
             target = self.model.flat_state_dict()
             checkpointer = ocp.StandardCheckpointer()
             try:
@@ -991,8 +1062,10 @@ class Trainer:
                     model_state_path,
                     target=target,
                 )
+
             finally:
                 checkpointer.close()
+
             self.model.load_flat_state_dict(restored)
             return
 
@@ -1028,6 +1101,7 @@ class Trainer:
                 'Resume checkpoint contains both full-model and adapter '
                 'weights'
             )
+        
         if has_adapter:
             from taktiny.takt import Takt
 
@@ -1037,6 +1111,7 @@ class Trainer:
                 local=True,
             )
             return
+        
         if not has_model:
             raise FileNotFoundError(
                 'Resume checkpoint contains neither model nor adapter '
@@ -1049,6 +1124,7 @@ class Trainer:
                 f'{type(self.model).__name__} cannot load full model '
                 'checkpoints in place'
             )
+        
         load_pretrained(checkpoint_path)
 
     def _write_trainer_state(
@@ -1066,6 +1142,7 @@ class Trainer:
                 epoch=epoch,
                 step_in_epoch=step_in_epoch,
             )
+
         trainer_state_path = os.path.join(
             checkpoint_path,
             'trainer_state.json',
@@ -1073,11 +1150,13 @@ class Trainer:
         temporary_path = (
             f'{trainer_state_path}.tmp-{uuid.uuid4().hex}'
         )
+
         try:
             with open(temporary_path, 'w') as trainer_state_file:
                 json.dump(state, trainer_state_file, indent=2)
                 trainer_state_file.flush()
                 os.fsync(trainer_state_file.fileno())
+
             os.replace(temporary_path, trainer_state_path)
         finally:
             if os.path.isfile(temporary_path):
@@ -1106,6 +1185,7 @@ class Trainer:
             value = jax.device_get(value)
             if isinstance(value, np.ndarray):
                 return np.array(value, copy=True)
+            
             return copy.deepcopy(value)
 
         return jax.tree.map(copy_leaf, tree)
@@ -1114,6 +1194,7 @@ class Trainer:
     def _sync_hosts(name):
         if jax.process_count() <= 1:
             return
+        
         from jax.experimental import multihost_utils
 
         multihost_utils.sync_global_devices(name)
@@ -1122,11 +1203,13 @@ class Trainer:
         if jax.process_index() == 0:
             if checkpoint_path not in self.saved_checkpoints:
                 self.saved_checkpoints.append(checkpoint_path)
+
             self._rotate_checkpoints()
             self._call_event(
                 'on_save',
                 checkpoint_path=checkpoint_path,
             )
+
         self._sync_hosts(
             f'taktiny-checkpoint-finalize-{os.path.basename(checkpoint_path)}'
         )
@@ -1179,10 +1262,12 @@ class Trainer:
                     checkpointer.wait_until_finished()
                 finally:
                     checkpointer.close()
+
                 if is_primary:
                     save_config = getattr(self.model, '_save_config', None)
                     if callable(save_config):
                         save_config(temporary_path)
+
             elif is_primary:
                 if model_snapshot is None:
                     self.model.save_pretrained(
@@ -1191,6 +1276,7 @@ class Trainer:
                             self.training_config.max_shard_size
                         ),
                     )
+
                 else:
                     self.model._save_pretrained_snapshot(
                         model_snapshot,
@@ -1199,6 +1285,7 @@ class Trainer:
                             self.training_config.max_shard_size
                         ),
                     )
+
             self._sync_hosts(f'taktiny-checkpoint-model-{barrier_name}')
 
             if dataloader_state is not None:
@@ -1206,6 +1293,7 @@ class Trainer:
                     temporary_path,
                     dataloader_state,
                 )
+
             self._save_rng_state(temporary_path, rng_state)
 
             if self.training_config.save_optimizer_state:
@@ -1235,6 +1323,7 @@ class Trainer:
                     step_in_epoch=trainer_state['step_in_epoch'],
                     state=trainer_state,
                 )
+
             self._sync_hosts(f'taktiny-checkpoint-close-{barrier_name}')
 
             if is_primary:
@@ -1243,6 +1332,7 @@ class Trainer:
                         f'Checkpoint already exists: {checkpoint_path}'
                     )
                 os.replace(temporary_path, checkpoint_path)
+
             self._sync_hosts(f'taktiny-checkpoint-publish-{barrier_name}')
             return checkpoint_path
         except BaseException:
@@ -1257,6 +1347,7 @@ class Trainer:
     def _drain_pending_checkpoint(self):
         if self._pending_checkpoint is None:
             return None
+        
         checkpoint_path, future = self._pending_checkpoint
         self._pending_checkpoint = None
         try:
@@ -1266,6 +1357,7 @@ class Trainer:
                 self._checkpoint_executor.shutdown(wait=True)
                 self._checkpoint_executor = None
             raise
+
         self._finalize_checkpoint(checkpoint_path)
         return checkpoint_path
 
@@ -1303,6 +1395,7 @@ class Trainer:
             temporary_path = (
                 f'{checkpoint_path}.tmp-{uuid.uuid4().hex}'
             )
+            
         dataloader_state = self._capture_dataloader_state()
         rng_state = self._capture_rng_state()
         trainer_state = self._trainer_state(

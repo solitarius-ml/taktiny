@@ -42,7 +42,8 @@ class Gemma(TransformerCausalLM):
         config, 
         rngs: nn.Rngs = None, 
         mesh=None, 
-        sharding_rules=None
+        sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -56,6 +57,7 @@ class Gemma(TransformerCausalLM):
             norm=GemmaRMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
 
     @classmethod
@@ -84,6 +86,7 @@ class Gemma2(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -106,6 +109,7 @@ class Gemma2(TransformerCausalLM):
             norm=GemmaRMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
         self.final_logit_softcapping = getattr(
             config,
@@ -117,12 +121,14 @@ class Gemma2(TransformerCausalLM):
         self,
         x,
         attention_mask=None,
+        position_ids=None,
         ctx=None,
         logits_to_keep=0,
     ):
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             ctx=ctx,
             logits_to_keep=logits_to_keep,
         )
@@ -139,6 +145,7 @@ class Gemma3(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -199,6 +206,7 @@ class Gemma3(TransformerCausalLM):
             norm=Gemma3RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
         self.final_logit_softcapping = getattr(
             config,
@@ -210,12 +218,14 @@ class Gemma3(TransformerCausalLM):
         self,
         x,
         attention_mask=None,
+        position_ids=None,
         ctx=None,
         logits_to_keep=0,
     ):
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             ctx=ctx,
             logits_to_keep=logits_to_keep,
         )

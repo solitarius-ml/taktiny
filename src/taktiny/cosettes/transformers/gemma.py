@@ -95,6 +95,17 @@ class Gemma2DecoderLayer(TransformerDecoderLayer):
             post_feedforward_layernorm=GemmaRMSNorm,
         )
 
+        # SeqStack requires identical PyTree metadata across layers. Carry the
+        # alternating local/full window as a scalar scan input instead of a
+        # static ``int | None``. A max-length window is equivalent to full
+        # causal attention for every supported input position.
+        window_size = self.self_attn.window_size
+        if window_size is None:
+            window_size = config.max_position_embeddings
+        window_size = jnp.asarray(window_size, dtype=jnp.int32)
+        self.sliding_window = window_size
+        self.self_attn.window_size = window_size
+
 
 class Gemma3TextScaledWordEmbedding(GemmaTextScaledWordEmbedding):
     """Gemma 3 embedding with its scale rounded to the embedding dtype."""
@@ -264,6 +275,19 @@ class Gemma3DecoderLayer(TransformerDecoderLayer):
             mlp=GateMLP,
             post_feedforward_layernorm=Gemma3RMSNorm,
         )
+
+        # Gemma 3 alternates local and global attention, including distinct
+        # RoPE bases. Keep those per-layer values as scan leaves so every
+        # layer has the same PyTree structure in SeqStack.
+        window_size = self.self_attn.window_size
+        if window_size is None:
+            window_size = config.max_position_embeddings
+        window_size = jnp.asarray(window_size, dtype=jnp.int32)
+        rope_base = jnp.asarray(self.self_attn.pos_emb.base, dtype=jnp.float32)
+
+        self.sliding_window = window_size
+        self.self_attn.window_size = window_size
+        self.self_attn.pos_emb.base = rope_base
 
 
 __all__ = [
