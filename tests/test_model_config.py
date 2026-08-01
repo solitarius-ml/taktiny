@@ -3,7 +3,10 @@ import jax.numpy as jnp
 from taktiny import nn
 from taktiny.layers import RotaryEmbedding
 from taktiny.maestro._config import ModelConfig
+from taktiny.maestro.opus.gemma import Gemma2, Gemma3
 from taktiny.maestro.opus.llama import Llama
+from taktiny.maestro.opus.qwen import Qwen3
+from taktiny.cosettes.transformers.qwen import Qwen3DecoderLayer
 
 
 def test_nested_model_config_supports_mapping_get():
@@ -70,3 +73,112 @@ def test_scanned_llama_accepts_nested_rope_scaling_config():
     assert logits.shape == (1, 3, config.vocab_size)
     assert context is None
     assert jnp.all(jnp.isfinite(logits))
+
+
+def test_qwen3_uses_bias_free_attention_with_qk_norms():
+    config = ModelConfig(
+        num_hidden_layers=2,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=64,
+        rope_theta=1_000_000.0,
+        rope_scaling=None,
+        rms_norm_eps=1e-6,
+        hidden_act='silu',
+        attention_bias=False,
+        attention_dropout=0.0,
+        tie_word_embeddings=True,
+        dtype='float32',
+    )
+    model = Qwen3(config, rngs=nn.Rngs(0), use_list=False)
+    layer = model.model.layers.stacked
+    attention = layer.self_attn
+
+    assert isinstance(layer, Qwen3DecoderLayer)
+    assert attention.q_norm.eps == config.rms_norm_eps
+    assert attention.k_norm.eps == config.rms_norm_eps
+    assert not hasattr(attention.q_proj, 'bias')
+    assert not hasattr(attention.k_proj, 'bias')
+    assert not hasattr(attention.v_proj, 'bias')
+    assert not hasattr(attention.o_proj, 'bias')
+    assert model.tied_word_embeddings
+
+    logits, context = model(jnp.asarray([[1, 2, 3]], dtype=jnp.int32))
+
+    assert logits.shape == (1, 3, config.vocab_size)
+    assert context is None
+    assert jnp.all(jnp.isfinite(logits))
+
+
+def test_scanned_gemma2_matches_unrolled_alternating_attention():
+    config = ModelConfig(
+        num_hidden_layers=2,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=64,
+        rope_theta=10_000.0,
+        rope_scaling=None,
+        rms_norm_eps=1e-6,
+        hidden_act='gelu_pytorch_tanh',
+        attention_bias=False,
+        attention_dropout=0.0,
+        mlp_bias=False,
+        query_pre_attn_scalar=4,
+        attn_logit_softcapping=50.0,
+        final_logit_softcapping=30.0,
+        sliding_window=16,
+        dtype='float32',
+    )
+    unrolled = Gemma2(config, rngs=nn.Rngs(0), use_list=True)
+    scanned = Gemma2(config, rngs=nn.Rngs(0), use_list=False)
+    input_ids = jnp.asarray([[1, 2, 3, 4]], dtype=jnp.int32)
+
+    expected, _ = unrolled(input_ids)
+    actual, _ = scanned(input_ids)
+
+    assert isinstance(scanned.model.layers, nn.SeqStack)
+    assert not scanned.model.use_list
+    assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_scanned_gemma3_matches_unrolled_local_global_attention():
+    config = ModelConfig(
+        num_hidden_layers=6,
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        max_position_embeddings=64,
+        rope_theta=1_000_000.0,
+        rope_local_base_freq=10_000.0,
+        rope_parameters=None,
+        sliding_window=4,
+        sliding_window_pattern=6,
+        rms_norm_eps=1e-6,
+        hidden_act='gelu_pytorch_tanh',
+        attention_bias=False,
+        attention_dropout=0.0,
+        mlp_bias=False,
+        query_pre_attn_scalar=4,
+        dtype='float32',
+    )
+    unrolled = Gemma3(config, rngs=nn.Rngs(0), use_list=True)
+    scanned = Gemma3(config, rngs=nn.Rngs(0), use_list=False)
+    input_ids = jnp.asarray([[1, 2, 3, 4, 5, 6]], dtype=jnp.int32)
+
+    expected, _ = unrolled(input_ids)
+    actual, _ = scanned(input_ids)
+
+    assert isinstance(scanned.model.layers, nn.SeqStack)
+    assert not scanned.model.use_list
+    assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-5)

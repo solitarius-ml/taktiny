@@ -69,6 +69,33 @@ class TinyLoadableModel(PretrainedModel):
         )
 
 
+class TinyStackedLoadableModel(PretrainedModel):
+    def __init__(
+        self,
+        config,
+        rngs,
+        mesh=None,
+        sharding_rules=None,
+    ):
+        self.config = config
+
+        def layers():
+            for _ in range(config.num_hidden_layers):
+                layer = TinyProjectionBlock(0)
+                layer.proj.weight.value = jnp.zeros(
+                    (4, 3),
+                    dtype=config.torch_dtype,
+                )
+                layer.proj.weight.quantization = getattr(
+                    config,
+                    'quant',
+                    None,
+                )
+                yield layer
+
+        self.layers = nn.SeqStack(layers())
+
+
 class FakeRepoUrl:
     repo_id = 'resolved/model'
 
@@ -372,6 +399,66 @@ def test_from_pretrained_places_ptq_weights_on_default_device(tmp_path):
         jax.devices()[0] in component.devices()
         for component in jax.tree.leaves(weight)
     )
+
+
+def test_from_pretrained_streams_numbered_layers_into_seqstack(tmp_path):
+    layer_weights = [
+        np.arange(12, dtype=np.float32).reshape(3, 4),
+        np.arange(12, 24, dtype=np.float32).reshape(3, 4),
+    ]
+    save_file(
+        {
+            f'layers.{index}.proj.weight': weight
+            for index, weight in enumerate(layer_weights)
+        },
+        tmp_path / 'model.safetensors',
+    )
+    config = ModelConfig(
+        num_hidden_layers=2,
+        torch_dtype='float32',
+    )
+
+    restored = TinyStackedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+    )
+
+    expected = np.stack(layer_weights, axis=0).transpose(0, 2, 1)
+    np.testing.assert_array_equal(
+        restored.layers.stacked.proj.weight.value,
+        expected,
+    )
+
+
+def test_from_pretrained_quantizes_seqstack_layers_while_loading(tmp_path):
+    save_file(
+        {
+            f'layers.{index}.proj.weight': (
+                np.arange(index * 12, (index + 1) * 12, dtype=np.float32)
+                .reshape(3, 4)
+            )
+            for index in range(2)
+        },
+        tmp_path / 'model.safetensors',
+    )
+    config = ModelConfig(
+        num_hidden_layers=2,
+        torch_dtype='bfloat16',
+    )
+
+    restored = TinyStackedLoadableModel.from_pretrained(
+        tmp_path,
+        config,
+        local=True,
+        dtype='int4',
+    )
+
+    weight = restored.layers.stacked.proj.weight.value
+    assert isinstance(weight, qwix.QArray)
+    assert weight.shape == (2, 4, 3)
+    assert weight.scale.shape[0] == 2
+    assert not restored.layers.stacked.proj.weight.trainable
 
 
 def test_save_pretrained_finds_lora_inside_seqstack(tmp_path):

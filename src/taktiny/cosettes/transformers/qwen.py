@@ -309,6 +309,36 @@ class Qwen2DecoderLayer(TransformerDecoderLayer):
         )
 
 
+class Qwen3Attention(Attention):
+    """Qwen3 bias-free attention with per-head Q/K normalization."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.update(
+            bias=False,
+            q_bias=False,
+            k_bias=False,
+            v_bias=False,
+            o_bias=False,
+            use_qkv_norm=True,
+        )
+        super().__init__(*args, **kwargs)
+
+
+class Qwen3DecoderLayer(TransformerDecoderLayer):
+    """Qwen3 decoder layer with normalized query and key projections."""
+
+    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+        super().__init__(
+            config,
+            rngs=rngs,
+            layer_idx=layer_idx,
+            input_layernorm=nn.RMSNorm,
+            self_attn=Qwen3Attention,
+            post_attention_layernorm=nn.RMSNorm,
+            mlp=GateMLP,
+        )
+
+
 __all__ = [
     'QwenRotaryEmbedding',
     'QwenAttention',
@@ -316,4 +346,6 @@ __all__ = [
     'QwenDecoderLayer',
     'Qwen2Attention',
     'Qwen2DecoderLayer',
+    'Qwen3Attention',
+    'Qwen3DecoderLayer',
 ]

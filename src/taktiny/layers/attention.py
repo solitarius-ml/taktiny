@@ -43,6 +43,7 @@ class Attention(nn.Module):
         pos_emb: nn.Module = None,
         bias: bool = False, 
         use_qkv_norm: bool = False,
+        qkv_norm_eps: float = 1e-5,
         dtype: DType | str = None,
         window_size: int = None,
         rngs: nn.Rngs = None,
@@ -72,6 +73,7 @@ class Attention(nn.Module):
             )
         self.context_dim = hidden_size if context_dim is None else context_dim
         self.use_qkv_norm = use_qkv_norm
+        self.qkv_norm_eps = qkv_norm_eps
         self.window_size = window_size
         self.scaling = scaling
         self.softcap = softcap
@@ -117,10 +119,22 @@ class Attention(nn.Module):
         self.q_norm = self.k_norm = None
 
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_q_norm', False):
-            self.q_norm = nn.RMSNorm(self.head_dim, dtype=dtype, shard_mode=shard_mode)
+            self.q_norm = nn.RMSNorm(
+                self.head_dim,
+                eps=self.qkv_norm_eps,
+                dtype=dtype,
+                axis_names=('head_dim',),
+                shard_mode=shard_mode,
+            )
             
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_k_norm', False):
-            self.k_norm = nn.RMSNorm(self.head_dim, dtype=dtype, shard_mode=shard_mode)
+            self.k_norm = nn.RMSNorm(
+                self.head_dim,
+                eps=self.qkv_norm_eps,
+                dtype=dtype,
+                axis_names=('head_dim',),
+                shard_mode=shard_mode,
+            )
 
     def _scale_query(
         self,

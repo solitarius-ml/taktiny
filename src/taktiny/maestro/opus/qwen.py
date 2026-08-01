@@ -26,6 +26,7 @@ from taktiny.cosettes._common import (
 from taktiny.cosettes.transformers.qwen import (
     QwenDecoderLayer,
     Qwen2DecoderLayer,
+    Qwen3DecoderLayer,
 )
 from taktiny import nn
 
@@ -37,6 +38,7 @@ class Qwen(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -78,6 +80,7 @@ class Qwen(TransformerCausalLM):
             norm=nn.RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
 
     @classmethod
@@ -140,6 +143,7 @@ class Qwen2(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -151,6 +155,7 @@ class Qwen2(TransformerCausalLM):
             norm=nn.RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
 
 
@@ -161,7 +166,7 @@ class Qwen3(TransformerCausalLM):
         super().__init__(
             config,
             rngs=rngs,
-            decoder=Qwen2DecoderLayer,
+            decoder=Qwen3DecoderLayer,
             norm=nn.RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,

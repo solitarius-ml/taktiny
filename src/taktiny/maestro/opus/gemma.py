@@ -42,7 +42,8 @@ class Gemma(TransformerCausalLM):
         config, 
         rngs: nn.Rngs = None, 
         mesh=None, 
-        sharding_rules=None
+        sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -56,6 +57,7 @@ class Gemma(TransformerCausalLM):
             norm=GemmaRMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
 
     @classmethod
@@ -84,6 +86,7 @@ class Gemma2(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -106,6 +109,7 @@ class Gemma2(TransformerCausalLM):
             norm=GemmaRMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
         self.final_logit_softcapping = getattr(
             config,
@@ -141,6 +145,7 @@ class Gemma3(TransformerCausalLM):
         rngs: nn.Rngs = None,
         mesh=None,
         sharding_rules=None,
+        **kwargs
     ):
         if rngs is None:
             rngs = nn.Rngs(42)
@@ -201,6 +206,7 @@ class Gemma3(TransformerCausalLM):
             norm=Gemma3RMSNorm,
             mesh=mesh,
             sharding_rules=sharding_rules,
+            **kwargs
         )
         self.final_logit_softcapping = getattr(
             config,

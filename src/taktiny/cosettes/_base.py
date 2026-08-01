@@ -19,6 +19,7 @@ import json
 import re
 import tempfile
 import copy
+from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -989,7 +990,7 @@ class PretrainedModel(Module):
                 zero_point=zero_point,
             )
 
-        def materialize_parameter(key, value, parameter):
+        def parameter_quantization_rule(key, parameter):
             quantization = getattr(parameter, 'quantization', None)
             quantization_kind = getattr(
                 parameter,
@@ -1000,6 +1001,13 @@ class PretrainedModel(Module):
                 quantization,
                 key.rsplit('.', 1)[0],
                 op_name=quantization_kind,
+            )
+            return rule, quantization_kind
+
+        def materialize_parameter(key, value, parameter):
+            rule, quantization_kind = parameter_quantization_rule(
+                key,
+                parameter,
             )
             if rule is not None:
                 parameter.trainable = False
@@ -1028,6 +1036,33 @@ class PretrainedModel(Module):
                     getattr(parameter, 'axis_names', None),
                 ),
             )
+
+        def initialize_stacked_parameter(parameter):
+            sharding = parameter_sharding(
+                parameter,
+                getattr(parameter, 'axis_names', None),
+            )
+            shape = tuple(parameter.shape)
+            dtype = jnp.dtype(parameter.dtype)
+            if isinstance(sharding, jax.sharding.Sharding):
+                return jax.jit(
+                    lambda: jnp.zeros(shape, dtype=dtype),
+                    out_shardings=sharding,
+                )()
+            return jax.device_put(jnp.zeros(shape, dtype=dtype), sharding)
+
+        def update_stacked_parameter(stacked, layer, layer_index):
+            return jax.lax.dynamic_update_index_in_dim(
+                stacked,
+                layer,
+                layer_index,
+                axis=0,
+            )
+
+        update_stacked_parameter = jax.jit(
+            update_stacked_parameter,
+            donate_argnums=(0,),
+        )
 
         stacked_states = {}
         grouped_mapping = any(
@@ -1087,19 +1122,149 @@ class PretrainedModel(Module):
                                 if value.shape != layer_shape:
                                     value = value.reshape(layer_shape)
                                     
-                                if k_stacked not in stacked_states:
-                                    stacked_states[k_stacked] = np.zeros(target_var.shape, dtype=value.dtype)
-                                stacked_states[k_stacked][idx] = value
+                                stacked_state = stacked_states.get(k_stacked)
+                                if stacked_state is None:
+                                    rule, quantization_kind = (
+                                        parameter_quantization_rule(
+                                            k_stacked,
+                                            target_var,
+                                        )
+                                    )
+                                    if rule is None:
+                                        stacked_state = {
+                                            'kind': 'dense',
+                                            'value': initialize_stacked_parameter(
+                                                target_var
+                                            ),
+                                            'indices': set(),
+                                        }
+                                    else:
+                                        target_var.trainable = False
+                                        stacked_state = {
+                                            'kind': 'quantized',
+                                            'layers': {},
+                                            'rule': rule,
+                                            'quantization_kind': (
+                                                quantization_kind
+                                            ),
+                                        }
+                                    stacked_states[k_stacked] = stacked_state
+
+                                loaded_indices = (
+                                    stacked_state['indices']
+                                    if stacked_state['kind'] == 'dense'
+                                    else stacked_state['layers']
+                                )
+                                if idx in loaded_indices:
+                                    raise ValueError(
+                                        'Checkpoint contains duplicate layer '
+                                        f'{idx} for {k_stacked!r}'
+                                    )
+
+                                if stacked_state['kind'] == 'quantized':
+                                    layer_parameter = SimpleNamespace(
+                                        dtype=target_var.dtype,
+                                        input_axis_count=getattr(
+                                            target_var,
+                                            'input_axis_count',
+                                            None,
+                                        ),
+                                        quantization_batch_axis_count=max(
+                                            0,
+                                            getattr(
+                                                target_var,
+                                                'quantization_batch_axis_count',
+                                                1,
+                                            )
+                                            - 1,
+                                        ),
+                                    )
+                                    with jax.default_device(cpu_device):
+                                        if (
+                                            stacked_state[
+                                                'quantization_kind'
+                                            ]
+                                            == 'embedding'
+                                        ):
+                                            layer_value = quantize_embedding_weight(
+                                                value,
+                                                layer_parameter,
+                                                stacked_state['rule'],
+                                            )
+                                        else:
+                                            layer_value = quantize_linear_weight(
+                                                value,
+                                                layer_parameter,
+                                                stacked_state['rule'],
+                                            )
+                                    stacked_state['layers'][idx] = layer_value
+                                else:
+                                    target_dtype = np.dtype(target_var.dtype)
+                                    if value.dtype != target_dtype:
+                                        value = value.astype(
+                                            target_dtype,
+                                            copy=False,
+                                        )
+                                    axis_names = getattr(
+                                        target_var,
+                                        'axis_names',
+                                        None,
+                                    )
+                                    layer_axis_names = (
+                                        tuple(axis_names[1:])
+                                        if axis_names is not None
+                                        else None
+                                    )
+                                    layer_value = jax.device_put(
+                                        value,
+                                        parameter_sharding(
+                                            target_var,
+                                            layer_axis_names,
+                                            use_explicit=False,
+                                        ),
+                                    )
+                                    stacked_state['value'] = (
+                                        update_stacked_parameter(
+                                            stacked_state['value'],
+                                            layer_value,
+                                            jnp.asarray(idx, dtype=jnp.int32),
+                                        )
+                                    )
+                                    stacked_state['indices'].add(idx)
                                 continue
                                 
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
         # Move accumulated SeqStack weights to JAX
-        for k_stacked, stacked_array in stacked_states.items():
+        for k_stacked, stacked_state in stacked_states.items():
             target_var = current_state_dict[k_stacked]
-            new_state[k_stacked] = materialize_parameter(
-                k_stacked,
+            expected_indices = set(range(target_var.shape[0]))
+            loaded_indices = (
+                stacked_state['indices']
+                if stacked_state['kind'] == 'dense'
+                else set(stacked_state['layers'])
+            )
+            if loaded_indices != expected_indices:
+                missing = sorted(expected_indices - loaded_indices)
+                raise ValueError(
+                    f'Checkpoint is missing layers {missing} for '
+                    f'{k_stacked!r}'
+                )
+
+            if stacked_state['kind'] == 'dense':
+                new_state[k_stacked] = stacked_state['value']
+                continue
+
+            ordered_layers = [
+                stacked_state['layers'][index]
+                for index in range(target_var.shape[0])
+            ]
+            stacked_array = jax.tree.map(
+                lambda *values: jnp.stack(values, axis=0),
+                *ordered_layers,
+            )
+            new_state[k_stacked] = place_qarray(
                 stacked_array,
                 target_var,
             )
