@@ -14,14 +14,17 @@
 """Activation modules"""
 
 from __future__ import annotations
-
 from taktiny import nn
-from typing import Optional, Callable
+from collections.abc import Callable
 import jax
 
 
 class _ActBase(nn.Module):
-    def __call__(self, x: jax.Array, act_fn: Optional[str | Callable] = None):
+    def __call__(
+        self,
+        x: jax.Array,
+        act_fn: str | Callable[[jax.Array], jax.Array] | None = None,
+    ) -> jax.Array:
         if act_fn is None:
             act_fn = self.__class__.__name__.lower()
             if 'hard' in act_fn:
@@ -32,77 +35,77 @@ class _ActBase(nn.Module):
 
         return act_fn(x)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.__class__.__name__}()"
 
 
 class SiLU(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class GELU(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class ReLU(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class ELU(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class Swish(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class SELU(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class SoftPlus(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class Mish(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class HardSwish(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
-    
+
 
 class Sigmoid(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class SoftSign(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x, jax.nn.soft_sign)
 
 
 class Tanh(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class HardTanh(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 
 class HardSigmoid(_ActBase):
-    def __call__(self, x: jax.Array):
+    def __call__(self, x: jax.Array) -> jax.Array:
         return super().__call__(x)
 
 

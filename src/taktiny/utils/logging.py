@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Logging utilities."""
+from __future__ import annotations
+
+from typing import Any
+
 
 import logging
 import os
@@ -33,7 +37,7 @@ from logging import (
 from tqdm import auto as tqdm_lib
 import jax
 
-def is_jax_rank_zero():
+def is_jax_rank_zero() -> Any:
     try:
         return jax.process_index() == 0
     except Exception:
@@ -57,7 +61,7 @@ _rank_zero_filter = None
 
 
 class _RankZeroFilter(logging.Filter):
-    def filter(self, record):
+    def filter(self, record: Any) -> Any:
         # Always allow rank-zero logs, but keep debug-level messages from all ranks for troubleshooting.
         return is_jax_rank_zero() or record.levelno <= logging.DEBUG
 
@@ -107,7 +111,7 @@ def _configure_library_root_logger() -> None:
 
         if sys.stderr:  # only if sys.stderr exists, e.g. when not using pythonw in windows
             _default_handler.flush = sys.stderr.flush
-            
+
         formatter = logging.Formatter("[taktiny.%(levelname)s] %(message)s")
         _default_handler.setFormatter(formatter)
 
@@ -294,7 +298,7 @@ def reset_format() -> None:
         handler.setFormatter(formatter)
 
 
-def warning_advice(self, *args, **kwargs) -> None:
+def warning_advice(self, *args: Any, **kwargs: Any) -> None:
     """
     This method is identical to `logger.warning()`, but if env var TAKTINY_NO_ADVISORY_WARNINGS=1 is set, this
     warning will not be printed
@@ -311,40 +315,40 @@ logging.Logger.warning_advice = warning_advice
 class EmptyTqdm:
     """Dummy tqdm which doesn't do anything."""
 
-    def __init__(self, *args, **kwargs):  # pylint: disable=unused-argument
+    def __init__(self, *args: Any, **kwargs: Any) -> None:  # pylint: disable=unused-argument
         self._iterator = args[0] if args else None
 
-    def __iter__(self):
+    def __iter__(self) -> Any:
         return iter(self._iterator)
 
-    def __getattr__(self, _):
+    def __getattr__(self, _: Any) -> Any:
         """Return empty function."""
 
-        def empty_fn(*args, **kwargs):  # pylint: disable=unused-argument
+        def empty_fn(*args: Any, **kwargs: Any) -> None:  # pylint: disable=unused-argument
             return
 
         return empty_fn
 
-    def __enter__(self):
+    def __enter__(self) -> Any:
         return self
 
-    def __exit__(self, type_, value, traceback):
+    def __exit__(self, type_: Any, value: Any, traceback: Any) -> bool | None:
         return
 
 
 class _tqdm_cls:
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         if _tqdm_active:
             return tqdm_lib.tqdm(*args, **kwargs)
         else:
             return EmptyTqdm(*args, **kwargs)
 
-    def set_lock(self, *args, **kwargs):
+    def set_lock(self, *args: Any, **kwargs: Any) -> Any:
         self._lock = None
         if _tqdm_active:
             return tqdm_lib.tqdm.set_lock(*args, **kwargs)
 
-    def get_lock(self):
+    def get_lock(self) -> Any:
         if _tqdm_active:
             return tqdm_lib.tqdm.get_lock()
 

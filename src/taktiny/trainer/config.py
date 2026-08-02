@@ -15,58 +15,60 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from os import PathLike
-from typing import Any, Optional, Iterable, Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from typing import Any
+
+from taktiny.utils.typing import Batch, PathLike, PyTree
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     epochs: int = 1
-    max_steps: Optional[int] = None
+    max_steps: int | None = None
     learning_rate: float = 1e-3
-    schedule: Optional[Callable] = None
-    optimizer: Any = None # Optax optimizer, defaults to adamw if None
+    schedule: Callable[[Any], Any] | None = None
+    optimizer: Any = None  # Optax optimizer, defaults to AdamW.
     weight_decay: float = 0.0
     log_interval: int = 10
     seed: int = 42
     jit_compile: bool = True
     donate_batch: bool = False
     output_dir: str | PathLike | None = None
-    save_steps: Optional[int] = None
-    save_total_limit: Optional[int] = None
+    save_steps: int | None = None
+    save_total_limit: int | None = None
     save_at_end: bool = False
     save_optimizer_state: bool = True
     save_async: bool = False
     max_shard_size: int | str = '5GB'
     eval_strategy: str = 'no'
-    eval_steps: Optional[int] = None
+    eval_steps: int | None = None
     metric_for_best_model: str = 'eval_loss'
-    greater_is_better: Optional[bool] = None
+    greater_is_better: bool | None = None
     load_best_model_at_end: bool = False
     gradient_accumulation_steps: int = 1
-    max_grad_norm: Optional[float] = None
+    max_grad_norm: float | None = None
     skip_non_finite: bool = True
     loss_scale: float | str | None = None
     initial_loss_scale: float = 32768.0
     loss_scale_growth_interval: int = 2000
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.epochs < 1:
             raise ValueError('epochs should be a positive integer')
-        
+
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError('seed should be an integer')
-        
+
         if self.max_steps is not None and self.max_steps < 1:
             raise ValueError('max_steps should be a positive integer')
-        
+
         if self.log_interval < 1:
             raise ValueError('log_interval should be a positive integer')
-        
+
         if self.schedule is not None and not callable(self.schedule):
             raise TypeError('schedule should be callable')
-        
+
         if (
             self.save_steps is not None
             and (
@@ -85,21 +87,21 @@ class TrainingConfig:
             raise ValueError(
                 'save_total_limit should be a positive integer'
             )
-        
+
         if not isinstance(self.save_at_end, bool):
             raise TypeError('save_at_end should be a boolean')
-        
+
         if not isinstance(self.save_optimizer_state, bool):
             raise TypeError('save_optimizer_state should be a boolean')
-        
+
         if not isinstance(self.save_async, bool):
             raise TypeError('save_async should be a boolean')
-        
+
         if self.eval_strategy not in {'no', 'steps', 'epoch'}:
             raise ValueError(
                 'eval_strategy should be "no", "steps", or "epoch"'
             )
-        
+
         if (
             self.eval_steps is not None
             and (
@@ -109,12 +111,12 @@ class TrainingConfig:
             )
         ):
             raise ValueError('eval_steps should be a positive integer')
-        
+
         if self.eval_strategy == 'steps' and self.eval_steps is None:
             raise ValueError(
                 'eval_steps is required when eval_strategy="steps"'
             )
-        
+
         if not (
             isinstance(self.metric_for_best_model, str)
             and self.metric_for_best_model
@@ -122,16 +124,16 @@ class TrainingConfig:
             raise TypeError(
                 'metric_for_best_model should be a non-empty string'
             )
-        
+
         if (
             self.greater_is_better is not None
             and not isinstance(self.greater_is_better, bool)
         ):
             raise TypeError('greater_is_better should be a boolean')
-        
+
         if not isinstance(self.load_best_model_at_end, bool):
             raise TypeError('load_best_model_at_end should be a boolean')
-        
+
         if (
             self.load_best_model_at_end
             and self.eval_strategy == 'no'
@@ -139,7 +141,7 @@ class TrainingConfig:
             raise ValueError(
                 'load_best_model_at_end requires evaluation'
             )
-        
+
         if (
             isinstance(self.gradient_accumulation_steps, bool)
             or not isinstance(self.gradient_accumulation_steps, int)
@@ -148,7 +150,7 @@ class TrainingConfig:
             raise ValueError(
                 'gradient_accumulation_steps should be a positive integer'
             )
-        
+
         if (
             self.max_grad_norm is not None
             and (
@@ -158,10 +160,10 @@ class TrainingConfig:
             )
         ):
             raise ValueError('max_grad_norm should be positive')
-        
+
         if not isinstance(self.skip_non_finite, bool):
             raise TypeError('skip_non_finite should be a boolean')
-        
+
         if not (
             self.loss_scale is None
             or self.loss_scale == 'dynamic'
@@ -174,14 +176,14 @@ class TrainingConfig:
             raise ValueError(
                 'loss_scale should be "dynamic", or a positive number'
             )
-        
+
         if (
             isinstance(self.initial_loss_scale, bool)
             or not isinstance(self.initial_loss_scale, (int, float))
             or self.initial_loss_scale <= 0
         ):
             raise ValueError('initial_loss_scale should be positive')
-        
+
         if (
             isinstance(self.loss_scale_growth_interval, bool)
             or not isinstance(self.loss_scale_growth_interval, int)
@@ -190,7 +192,7 @@ class TrainingConfig:
             raise ValueError(
                 'loss_scale_growth_interval should be a positive integer'
             )
-        
+
         if (
             self.output_dir is None
             and (
@@ -209,21 +211,21 @@ class DatasetConfig:
 
     # A generic iterable that yields batches (e.g. Grain, PyTorch, or custom).
     # When supplied, all repo-loading options below are ignored.
-    train_dataloader: Iterable[Any] = None
-    validation_dataloader: Optional[Iterable[Any]] = None
+    train_dataloader: Iterable[Batch] | None = None
+    validation_dataloader: Iterable[Batch] | None = None
     # Sharding applied to every batch leaf, or a matching sharding PyTree.
-    batch_sharding: Any = None
+    batch_sharding: PyTree | None = None
     shuffle: bool = True
     seed: int = 42
     prefetch_size: int = 2
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.train_dataloader is None:
             raise TypeError('train_dataloader is required')
-        
+
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise TypeError('seed should be an integer')
-        
+
         if (
             isinstance(self.prefetch_size, bool)
             or not isinstance(self.prefetch_size, int)

@@ -14,6 +14,8 @@
 """Deepseek architectures"""
 
 from __future__ import annotations
+from typing import Any
+
 
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes._common import TransformerCausalLM
@@ -24,7 +26,7 @@ from taktiny import nn
 
 
 class Deepseek(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -39,7 +41,7 @@ class Deepseek(TransformerCausalLM):
 
 
 class DeepseekV2(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -54,7 +56,7 @@ class DeepseekV2(TransformerCausalLM):
 
 
 class DeepseekV3(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -69,7 +71,7 @@ class DeepseekV3(TransformerCausalLM):
 
 
 class DeepseekV3_2(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -84,7 +86,7 @@ class DeepseekV3_2(TransformerCausalLM):
 
 
 class DeepseekV4(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(

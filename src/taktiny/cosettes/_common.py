@@ -14,11 +14,18 @@
 """Common base modules for transformer architectures"""
 
 from __future__ import annotations
-
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from typing import Any, Self
 from taktiny import nn
 from taktiny.cosettes._base import PretrainedModel
 from taktiny.maestro._config import ModelConfig
-from taktiny.utils.typing import ShardMode
+from taktiny.utils.typing import (
+    ArrayLike,
+    DType,
+    LogicalRules,
+    PathLike,
+    ShardMode,
+)
 from taktiny.utils.sharding import create_sharding
 from taktiny.layers import RotaryEmbedding, GateMLP, Attention
 
@@ -27,11 +34,23 @@ import jax
 import jax.numpy as jnp
 import qwix
 from dataclasses import replace
-from typing import *
 from functools import partial
 
 
-def _approximate_gelu(x):
+KVCache = tuple[jax.Array, jax.Array]
+DecodeCarry = tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+]
+GenerationSettings = tuple[int, jax.Array, int]
+
+
+def _approximate_gelu(x: jax.Array) -> jax.Array:
     return jax.nn.gelu(x, approximate=True)
 
 
@@ -76,7 +95,14 @@ class TransformerDecoderLayer(nn.Module):
         cache, or ``None`` when no cache was supplied.
     """
 
-    def __init__(self, config, *, rngs, layer_idx=None, **modules):
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        rngs: nn.Rngs,
+        layer_idx: int | None = None,
+        **modules: nn.Module | type[nn.Module],
+    ) -> None:
         shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
         quant = getattr(config, 'quant', None)
         dot_general = getattr(config, 'dot_general', None)
@@ -214,30 +240,30 @@ class TransformerDecoderLayer(nn.Module):
     @staticmethod
     def _create_module(
         *,
-        name,
-        module_type,
-        hidden_size,
-        intermediate_size,
-        num_heads,
-        num_kv_heads,
-        head_dim,
-        max_position_embeddings,
-        rope_theta,
-        rope_scaling,
-        sliding_window,
-        hidden_act,
-        attention_bias,
-        attention_scaling,
-        attention_softcap,
-        attention_dropout,
-        mlp_bias,
-        eps,
-        dtype,
-        shard_mode,
-        quant,
-        dot_general,
-        rngs,
-    ):
+        name: str,
+        module_type: nn.Module | type[nn.Module],
+        hidden_size: int,
+        intermediate_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        max_position_embeddings: int,
+        rope_theta: float,
+        rope_scaling: Mapping[str, Any] | None,
+        sliding_window: int | None,
+        hidden_act: str | Callable[[jax.Array], jax.Array],
+        attention_bias: bool,
+        attention_scaling: float | None,
+        attention_softcap: float | None,
+        attention_dropout: float,
+        mlp_bias: bool,
+        eps: float,
+        dtype: DType | str,
+        shard_mode: ShardMode,
+        quant: Any,
+        dot_general: Callable[..., jax.Array] | None,
+        rngs: nn.Rngs,
+    ) -> tuple[nn.Module, str]:
         if isinstance(module_type, nn.Module):
             module = module_type
             module_type = type(module)
@@ -323,7 +349,11 @@ class TransformerDecoderLayer(nn.Module):
         return module, kind
 
     @staticmethod
-    def _apply_norm(module, x, out_sharding):
+    def _apply_norm(
+        module: nn.Module,
+        x: jax.Array,
+        out_sharding: jax.sharding.Sharding | None,
+    ) -> jax.Array:
         if isinstance(module, nn.RMSNorm):
             return module(x, out_sharding=out_sharding)
         return module(x)
@@ -331,12 +361,12 @@ class TransformerDecoderLayer(nn.Module):
     def __call__(
         self,
         x: jax.Array,
-        attention_mask: jax.Array = None,
-        kv_cache: tuple[jax.Array, jax.Array] = None,
-        position_idx: jax.Array = None,
+        attention_mask: jax.Array | None = None,
+        kv_cache: KVCache | None = None,
+        position_idx: jax.Array | None = None,
         is_causal: bool = False,
-        out_sharding=None,
-    ):
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> tuple[jax.Array, KVCache | None]:
         residual = x
         pending = None
         new_cache = None
@@ -424,8 +454,15 @@ class TransformerModel(nn.Module):
     """
 
     def __init__(
-        self, config, *, rngs, module, embedding, norm=None, use_list=True
-    ):
+        self,
+        config: ModelConfig,
+        *,
+        rngs: nn.Rngs,
+        module: type[nn.Module],
+        embedding: nn.Module | type[nn.Module],
+        norm: nn.Module | type[nn.Module] | None = None,
+        use_list: bool = True,
+    ) -> None:
         num_hidden_layers = getattr(config, 'num_hidden_layers', None)
         vocab_size = getattr(config, 'vocab_size', None)
         hidden_size = getattr(config, 'hidden_size', None)
@@ -478,7 +515,7 @@ class TransformerModel(nn.Module):
                 )
             )
         else:
-            def stacked_layers():
+            def stacked_layers() -> Iterator[nn.Module]:
                 for layer_idx in range(num_hidden_layers):
                     layer = module(config, rngs=rngs, layer_idx=layer_idx)
                     layer.layer_idx = None
@@ -510,22 +547,22 @@ class TransformerModel(nn.Module):
 
         self.remat = False
 
-    def enable_remat(self):
+    def enable_remat(self) -> None:
         self.remat = True
 
     def __call__(
         self,
         x: jax.Array,
-        attention_mask: jax.Array = None,
-        kv_cache: tuple[jax.Array, jax.Array] = None,
-        position_idx: jax.Array = None,
+        attention_mask: jax.Array | None = None,
+        kv_cache: KVCache | None = None,
+        position_idx: jax.Array | None = None,
         is_causal: bool = False,
-        out_sharding=None,
-    ):
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> tuple[jax.Array, KVCache | None]:
         if not jnp.issubdtype(x.dtype, jnp.inexact):
             x = self.embed_tokens(x)
 
-        def call_layer(layer, hidden_states, layer_cache):
+        def call_layer(layer: Any, hidden_states: Any, layer_cache: Any) -> Any:
             return layer(
                 hidden_states,
                 attention_mask=attention_mask,
@@ -556,7 +593,7 @@ class TransformerModel(nn.Module):
                 )
 
         if not self.use_list:
-            def apply_layer(layer, carry):
+            def apply_layer(layer: Any, carry: Any) -> tuple[Any, ...]:
                 hidden_states, layer_idx = carry
                 layer_cache = None
                 if kv_cache is not None:
@@ -674,23 +711,23 @@ class TransformerCausalLM(PretrainedModel):
     def __init__(
         self, config: ModelConfig,
         *, rngs: nn.Rngs,
-        embedding = None,
-        decoder = None,
-        norm = None,
-        lm_head = None,
-        mesh: jax.sharding.Mesh = None,
-        sharding_rules: Optional[List[Tuple]] = None,
-        use_list=True,
-    ):
+        embedding: nn.Module | type[nn.Module] | None = None,
+        decoder: type[nn.Module] | None = None,
+        norm: nn.Module | type[nn.Module] | None = None,
+        lm_head: nn.Module | type[nn.Module] | None = None,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        use_list: bool = True,
+    ) -> None:
         if decoder is None:
             raise ValueError('decoder is required')
-        
+
         if embedding is None:
             embedding = nn.Embedding
 
         if (vocab_size := getattr(config, 'vocab_size', None)) is None:
             raise ValueError('Missing required transformer config value: vocab_size')
-        
+
         if (hidden_size := getattr(config, 'hidden_size', None)) is None:
             raise ValueError('Missing required transformer config value: hidden_size')
 
@@ -765,10 +802,10 @@ class TransformerCausalLM(PretrainedModel):
                 rules=sharding_rules,
             )
 
-    def enable_remat(self):
+    def enable_remat(self) -> None:
         self.model.enable_remat()
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         if (
             name == 'lm_head'
             and self.__dict__.get('tied_word_embeddings', False)
@@ -781,11 +818,11 @@ class TransformerCausalLM(PretrainedModel):
     def __call__(
         self,
         x: jax.Array,
-        attention_mask: jax.Array = None,
-        position_ids: jax.Array = None,
-        ctx: TransformerContext = None,
+        attention_mask: jax.Array | None = None,
+        position_ids: jax.Array | None = None,
+        ctx: TransformerContext | None = None,
         logits_to_keep: int | jax.Array = 0,
-    ):
+    ) -> tuple[jax.Array, TransformerContext | None]:
         if ctx is not None and not isinstance(ctx, TransformerContext):
             raise TypeError('ctx must be a TransformerContext or None')
 
@@ -873,13 +910,19 @@ class TransformerCausalLM(PretrainedModel):
         return logits, ctx
 
     @classmethod
-    def _load_from_pretrained(cls, path_or_repo, config, module_map, **kwargs):
+    def _load_from_pretrained(
+        cls,
+        path_or_repo: PathLike,
+        config: ModelConfig,
+        module_map: Mapping[str, str] | Sequence[tuple[str, str]] | None,
+        **kwargs: Any,
+    ) -> Self:
         module_map = module_map or []
         if isinstance(module_map, dict):
             module_map = list(module_map.items())
-            
+
         tied = getattr(config, 'tie_word_embeddings', False)
-        
+
         new_module_map = list(module_map)
         if tied:
             embedding_target = None
@@ -897,17 +940,24 @@ class TransformerCausalLM(PretrainedModel):
                 new_module_map.append(
                     ('lm_head.weight', embedding_target)
                 )
-            
+
         return super().from_pretrained(path_or_repo, config=config, module_map=new_module_map, **kwargs)
 
     @classmethod
-    def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
+    def from_pretrained(
+        cls,
+        path_or_repo: PathLike,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        local: bool = False,
+        **kwargs: Any,
+    ) -> Self:
         # Load config
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
             config = ModelConfig.load_config(path_or_repo, local=local)
-        
+
         # We define how HuggingFace weights map to our components using our new Tuple format
         module_map = [
             ("model.embed_tokens.weight", "model.embed_tokens.embedding"),
@@ -916,23 +966,23 @@ class TransformerCausalLM(PretrainedModel):
         # Call the base class safetensors loader
         # (Note: PretrainedModel.from_pretrained will need to be updated to pass mesh and sharding_rules down!)
         return cls._load_from_pretrained(
-            path_or_repo, 
-            config, 
-            module_map, 
-            local=local, 
+            path_or_repo,
+            config,
+            module_map,
+            local=local,
             mesh=mesh,
             sharding_rules=sharding_rules,
             **kwargs
         )
-    
+
     def _sample(
-        self, 
-        logits: jax.Array, 
-        temperature: float, 
-        top_k: int, 
-        top_p: float, 
+        self,
+        logits: jax.Array,
+        temperature: float,
+        top_k: int,
+        top_p: float,
         key: jax.Array,
-        seen_tokens: jax.Array = None,
+        seen_tokens: jax.Array | None = None,
         repetition_penalty: float = 1.0,
     ) -> jax.Array:
         if seen_tokens is not None:
@@ -945,46 +995,47 @@ class TransformerCausalLM(PretrainedModel):
 
         greedy_tokens = jnp.argmax(logits, axis=-1)[:, None]
         logits = logits / jnp.maximum(temperature, 1e-5)
-        
+
         if top_k > 0:
             top_k = min(top_k, logits.shape[-1])
             top_k_logits, _ = jax.lax.top_k(logits, top_k)
             min_top_k = top_k_logits[:, -1:]
             logits = jnp.where(logits >= min_top_k, logits, -jnp.inf)
-            
+
         if top_p < 1.0:
             sorted_indices = jnp.argsort(logits, axis=-1)[:, ::-1]
             sorted_logits = jnp.take_along_axis(logits, sorted_indices, axis=-1)
             cumulative_probs = jnp.cumsum(jax.nn.softmax(sorted_logits, axis=-1), axis=-1)
-            
+
             # Remove tokens with cumulative probability above the threshold
             sorted_indices_to_remove = cumulative_probs > top_p
             # Shift the mask to the right to keep the first token that crosses the threshold
             sorted_indices_to_remove = jnp.roll(sorted_indices_to_remove, 1, axis=-1)
             sorted_indices_to_remove = sorted_indices_to_remove.at[:, 0].set(False)
-            
+
             # Map back to original order
             indices_to_remove = jnp.empty_like(sorted_indices_to_remove)
             indices_to_remove = indices_to_remove.at[
                 jnp.arange(logits.shape[0])[:, None], sorted_indices
             ].set(sorted_indices_to_remove)
-            
+
             logits = jnp.where(indices_to_remove, -jnp.inf, logits)
-            
+
         sampled_tokens = jax.random.categorical(key, logits)[:, None]
         return jnp.where(temperature <= 0, greedy_tokens, sampled_tokens)
 
     @partial(jax.jit, static_argnames=['max_seq_len', 'top_k', 'top_p'])
     def _decode_step(
-        self, carry, 
-        max_seq_len: int = None, 
-        temperature: float = 1.0, 
-        top_k: int = 50, 
+        self,
+        carry: DecodeCarry,
+        max_seq_len: int | None = None,
+        temperature: float = 1.0,
+        top_k: int = 50,
         top_p: float = 1.0,
         repetition_penalty: float = 1.0,
-        eos_token_ids: jax.Array = None,
+        eos_token_ids: jax.Array | None = None,
         pad_token_id: int = 0,
-    ):
+    ) -> tuple[DecodeCarry, jax.Array]:
         (
             token,
             k_cache,
@@ -994,24 +1045,24 @@ class TransformerCausalLM(PretrainedModel):
             finished,
             seen_tokens,
         ) = carry
-        
+
         decode_ctx = TransformerContext(
             key_cache=k_cache,
             value_cache=v_cache,
             position_idx=pos,
             is_causal=False
         )
-        
+
         mask = jnp.arange(max_seq_len)[None, :] <= pos[:, None]
         mask = mask[:, None, None, :]
-        
+
         step_logits, decode_ctx = self(
             token,
             attention_mask=mask,
             ctx=decode_ctx,
             logits_to_keep=1,
         )
-        
+
         rng, subkey = jax.random.split(rng)
         next_t = self._sample(
             step_logits[:, -1, :],
@@ -1043,7 +1094,7 @@ class TransformerCausalLM(PretrainedModel):
             batch_indices,
             next_t[:, 0],
         ].set(True)
-        
+
         return (
             next_t,
             decode_ctx.key_cache,
@@ -1056,18 +1107,18 @@ class TransformerCausalLM(PretrainedModel):
 
     def _prepare_generation(
         self,
-        input_ids,
-        max_new_tokens,
+        input_ids: ArrayLike,
+        max_new_tokens: int,
         *,
-        attention_mask,
-        temperature,
-        top_k,
-        top_p,
-        repetition_penalty,
-        eos_token_id,
-        pad_token_id,
-        seed,
-    ):
+        attention_mask: ArrayLike | None,
+        temperature: float,
+        top_k: int,
+        top_p: float,
+        repetition_penalty: float,
+        eos_token_id: int | Sequence[int] | None,
+        pad_token_id: int | None,
+        seed: int,
+    ) -> tuple[jax.Array, DecodeCarry, GenerationSettings]:
         if not isinstance(max_new_tokens, int) or max_new_tokens < 1:
             raise ValueError('max_new_tokens must be a positive integer')
         if not isinstance(top_k, int) or top_k < 0:
@@ -1242,17 +1293,17 @@ class TransformerCausalLM(PretrainedModel):
 
     def generate(
         self,
-        input_ids: jax.Array,
+        input_ids: ArrayLike,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
         seed: int = 42,
-        attention_mask: jax.Array = None,
+        attention_mask: ArrayLike | None = None,
         repetition_penalty: float = 1.0,
-        eos_token_id: int | Sequence[int] = None,
-        pad_token_id: int = None,
-        streamer=None,
+        eos_token_id: int | Sequence[int] | None = None,
+        pad_token_id: int | None = None,
+        streamer: Any = None,
     ) -> jax.Array:
         if not isinstance(max_new_tokens, int) or max_new_tokens < 0:
             raise ValueError('max_new_tokens must be a non-negative integer')
@@ -1315,11 +1366,15 @@ class TransformerCausalLM(PretrainedModel):
         )
         generated = generated.at[:, 0].set(carry[0][:, 0])
 
-        def cond_fn(loop_state):
+        def cond_fn(
+            loop_state: tuple[jax.Array, DecodeCarry, jax.Array],
+        ) -> jax.Array:
             step, decode_carry, _ = loop_state
             return (step < max_new_tokens) & ~jnp.all(decode_carry[5])
 
-        def body_fn(loop_state):
+        def body_fn(
+            loop_state: tuple[jax.Array, DecodeCarry, jax.Array],
+        ) -> tuple[jax.Array, DecodeCarry, jax.Array]:
             step, decode_carry, tokens = loop_state
             decode_carry, next_token = self._decode_step(
                 decode_carry,
@@ -1347,17 +1402,17 @@ class TransformerCausalLM(PretrainedModel):
 
     def stream_generate(
         self,
-        input_ids: jax.Array,
+        input_ids: ArrayLike,
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
         seed: int = 42,
-        attention_mask: jax.Array = None,
+        attention_mask: ArrayLike | None = None,
         repetition_penalty: float = 1.0,
-        eos_token_id: int | Sequence[int] = None,
-        pad_token_id: int = None,
-    ):
+        eos_token_id: int | Sequence[int] | None = None,
+        pad_token_id: int | None = None,
+    ) -> Iterator[jax.Array]:
         """Yield one generated token per batch row at each decode step."""
         if max_new_tokens == 0:
             return
@@ -1430,25 +1485,25 @@ class TransformerConditionalGeneration(PretrainedModel):
 
     def __init__(
         self,
-        config: ModelConfig = None,
+        config: ModelConfig | None = None,
         *,
-        rngs: nn.Rngs = None,
-        language_model = None,
-        decoder = None,
-        embedding = None,
-        norm = None,
-        lm_head = None,
-        vision_tower = None,
-        multi_modal_projector = None,
-        audio_tower = None,
-        audio_projector = None,
-        image_token_id: Optional[int] = None,
-        video_token_id: Optional[int] = None,
-        audio_token_id: Optional[int] = None,
-        mesh: jax.sharding.Mesh = None,
-        sharding_rules: Optional[List[Tuple]] = None,
-        **kwargs,
-    ):
+        rngs: nn.Rngs | None = None,
+        language_model: nn.Module | type[nn.Module] | None = None,
+        decoder: type[nn.Module] | None = None,
+        embedding: nn.Module | type[nn.Module] | None = None,
+        norm: nn.Module | type[nn.Module] | None = None,
+        lm_head: nn.Module | type[nn.Module] | None = None,
+        vision_tower: nn.Module | type[nn.Module] | None = None,
+        multi_modal_projector: nn.Module | type[nn.Module] | None = None,
+        audio_tower: nn.Module | type[nn.Module] | None = None,
+        audio_projector: nn.Module | type[nn.Module] | None = None,
+        image_token_id: int | None = None,
+        video_token_id: int | None = None,
+        audio_token_id: int | None = None,
+        mesh: jax.sharding.Mesh | None = None,
+        sharding_rules: LogicalRules | None = None,
+        **kwargs: Any,
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -1523,7 +1578,7 @@ class TransformerConditionalGeneration(PretrainedModel):
         self.video_token_id = video_token_id or getattr(config, 'video_token_id', None)
         self.audio_token_id = audio_token_id or getattr(config, 'audio_token_id', None)
 
-    def get_input_embeddings(self):
+    def get_input_embeddings(self) -> nn.Module | None:
         if self.language_model is not None and hasattr(self.language_model, 'get_input_embeddings'):
             return self.language_model.get_input_embeddings()
         elif self.language_model is not None and hasattr(self.language_model, 'model'):
@@ -1532,7 +1587,7 @@ class TransformerConditionalGeneration(PretrainedModel):
             return self.embed_tokens
         return None
 
-    def get_output_embeddings(self):
+    def get_output_embeddings(self) -> nn.Module | None:
         if self.language_model is not None and hasattr(self.language_model, 'get_output_embeddings'):
             return self.language_model.get_output_embeddings()
         elif self.language_model is not None and hasattr(self.language_model, 'lm_head'):
@@ -1541,22 +1596,22 @@ class TransformerConditionalGeneration(PretrainedModel):
             return self.lm_head
         return None
 
-    def get_language_model(self):
+    def get_language_model(self) -> nn.Module | None:
         return self.language_model
 
-    def get_vision_tower(self):
+    def get_vision_tower(self) -> nn.Module | None:
         return self.vision_tower
 
-    def get_multi_modal_projector(self):
+    def get_multi_modal_projector(self) -> nn.Module | None:
         return self.multi_modal_projector
 
-    def enable_remat(self):
+    def enable_remat(self) -> None:
         if self.language_model is not None and hasattr(self.language_model, 'enable_remat'):
             self.language_model.enable_remat()
         if self.vision_tower is not None and hasattr(self.vision_tower, 'enable_remat'):
             self.vision_tower.enable_remat()
 
-    def encode_vision(self, pixel_values: jax.Array, **kwargs) -> jax.Array:
+    def encode_vision(self, pixel_values: jax.Array, **kwargs: Any) -> jax.Array:
         """Encode vision inputs and project features into hidden dimension."""
         if self.vision_tower is None:
             raise ValueError("vision_tower is not configured for this model")
@@ -1570,7 +1625,7 @@ class TransformerConditionalGeneration(PretrainedModel):
             vision_features = self.multi_modal_projector(vision_features)
         return vision_features
 
-    def encode_audio(self, input_features: jax.Array, **kwargs) -> jax.Array:
+    def encode_audio(self, input_features: jax.Array, **kwargs: Any) -> jax.Array:
         """Encode audio inputs and project features into hidden dimension."""
         if self.audio_tower is None:
             raise ValueError("audio_tower is not configured for this model")
@@ -1603,18 +1658,18 @@ class TransformerConditionalGeneration(PretrainedModel):
 
     def __call__(
         self,
-        input_ids: jax.Array = None,
-        pixel_values: jax.Array = None,
-        input_features: jax.Array = None,
-        pixel_attention_mask: jax.Array = None,
-        image_sizes: jax.Array = None,
-        inputs_embeds: jax.Array = None,
-        attention_mask: jax.Array = None,
-        ctx: TransformerContext = None,
+        input_ids: jax.Array | None = None,
+        pixel_values: jax.Array | None = None,
+        input_features: jax.Array | None = None,
+        pixel_attention_mask: jax.Array | None = None,
+        image_sizes: jax.Array | None = None,
+        inputs_embeds: jax.Array | None = None,
+        attention_mask: jax.Array | None = None,
+        ctx: TransformerContext | None = None,
         logits_to_keep: int | jax.Array = 0,
-        image_token_id: int = None,
-        audio_token_id: int = None,
-        **kwargs,
+        image_token_id: int | None = None,
+        audio_token_id: int | None = None,
+        **kwargs: Any,
     ) -> tuple[jax.Array, TransformerContext | None]:
         if inputs_embeds is None:
             if input_ids is None:
@@ -1669,7 +1724,7 @@ class TransformerConditionalGeneration(PretrainedModel):
             raise NotImplementedError("Subclass must implement forward pass or provide language_model / model")
 
     @classmethod
-    def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
+    def from_pretrained(cls, path_or_repo: Any, mesh: Any=None, sharding_rules: Any=None, local: bool=False, **kwargs: Any) -> Any:
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
@@ -1694,15 +1749,15 @@ class TransformerConditionalGeneration(PretrainedModel):
         self,
         input_ids: jax.Array,
         max_new_tokens: int = 20,
-        pixel_values: jax.Array = None,
-        input_features: jax.Array = None,
-        attention_mask: jax.Array = None,
+        pixel_values: jax.Array | None = None,
+        input_features: jax.Array | None = None,
+        attention_mask: jax.Array | None = None,
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
         repetition_penalty: float = 1.0,
-        eos_token_id: int | list[int] | tuple[int, ...] = None,
-        pad_token_id: int = None,
+        eos_token_id: int | list[int] | tuple[int, ...] | None = None,
+        pad_token_id: int | None = None,
         seed: int = 42,
     ) -> jax.Array:
         """Autoregressively generate tokens conditioned on text and optional multimodal inputs."""
@@ -1732,7 +1787,7 @@ class TransformerConditionalGeneration(PretrainedModel):
 
 class DiffusionIM(PretrainedModel):
     """Base class for Diffusion Image Models (e.g., Flux, DiT, Stable Diffusion)."""
-    def __init__(self, config=None, *, rngs: nn.Rngs = None, **kwargs):
+    def __init__(self, config: Any=None, *, rngs: nn.Rngs | None = None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         self.config = config
@@ -1740,7 +1795,7 @@ class DiffusionIM(PretrainedModel):
 
 class DiffusionLM(PretrainedModel):
     """Base class for Diffusion Language Models (e.g., Diffusion Gemma, Discrete Diffusion LM)."""
-    def __init__(self, config=None, *, rngs: nn.Rngs = None, **kwargs):
+    def __init__(self, config: Any=None, *, rngs: nn.Rngs | None = None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         self.config = config

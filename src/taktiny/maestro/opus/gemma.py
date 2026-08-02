@@ -14,6 +14,8 @@
 """Gemma architectures"""
 
 from __future__ import annotations
+from typing import Any
+
 
 import jax.numpy as jnp
 
@@ -38,13 +40,13 @@ from taktiny import nn
 
 class Gemma(TransformerCausalLM):
     def __init__(
-        self, 
-        config, 
-        rngs: nn.Rngs = None, 
-        mesh=None, 
-        sharding_rules=None,
-        **kwargs
-    ):
+        self,
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -61,7 +63,7 @@ class Gemma(TransformerCausalLM):
         )
 
     @classmethod
-    def from_pretrained(cls, path_or_repo, mesh=None, sharding_rules=None, local=False, **kwargs):
+    def from_pretrained(cls, path_or_repo: Any, mesh: Any=None, sharding_rules: Any=None, local: bool=False, **kwargs: Any) -> Any:
         from taktiny.maestro._config import ModelConfig
         if 'config' in kwargs:
             config = kwargs.pop('config')
@@ -82,12 +84,12 @@ class Gemma(TransformerCausalLM):
 class Gemma2(TransformerCausalLM):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -119,12 +121,12 @@ class Gemma2(TransformerCausalLM):
 
     def __call__(
         self,
-        x,
-        attention_mask=None,
-        position_ids=None,
-        ctx=None,
-        logits_to_keep=0,
-    ):
+        x: Any,
+        attention_mask: Any=None,
+        position_ids: Any=None,
+        ctx: Any=None,
+        logits_to_keep: int=0,
+    ) -> tuple[Any, ...]:
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
@@ -141,12 +143,12 @@ class Gemma2(TransformerCausalLM):
 class Gemma3(TransformerCausalLM):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -216,12 +218,12 @@ class Gemma3(TransformerCausalLM):
 
     def __call__(
         self,
-        x,
-        attention_mask=None,
-        position_ids=None,
-        ctx=None,
-        logits_to_keep=0,
-    ):
+        x: Any,
+        attention_mask: Any=None,
+        position_ids: Any=None,
+        ctx: Any=None,
+        logits_to_keep: int=0,
+    ) -> tuple[Any, ...]:
         logits, ctx = super().__call__(
             x,
             attention_mask=attention_mask,
@@ -237,12 +239,12 @@ class Gemma3(TransformerCausalLM):
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo,
-        mesh=None,
-        sharding_rules=None,
-        local=False,
-        **kwargs,
-    ):
+        path_or_repo: Any,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        local: bool=False,
+        **kwargs: Any,
+    ) -> Any:
         from taktiny.maestro._config import ModelConfig
 
         if 'config' in kwargs:
@@ -262,7 +264,7 @@ class Gemma3(TransformerCausalLM):
 
 
 class Gemma3ConditionalGeneration(TransformerConditionalGeneration):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -277,7 +279,7 @@ class Gemma3ConditionalGeneration(TransformerConditionalGeneration):
 
 
 class Gemma4(TransformerConditionalGeneration):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -292,7 +294,7 @@ class Gemma4(TransformerConditionalGeneration):
 
 
 class Gemma4Unified(TransformerConditionalGeneration):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -307,7 +309,7 @@ class Gemma4Unified(TransformerConditionalGeneration):
 
 
 class DiffusionGemma(DiffusionLM):
-    def __init__(self):
+    def __init__(self) -> None:
         raise NotImplementedError(f'There is a plan to implement {self.__class__.__name__}.')
 
 
@@ -323,11 +325,11 @@ repertoire.register('Gemma4UnifiedForConditionalGeneration', Gemma4Unified)
 repertoire.register('DiffusionGemmaForBlockDiffusion', DiffusionGemma)
 
 __all__ = [
-    'Gemma', 
-    'Gemma2', 
-    'Gemma3', 
+    'Gemma',
+    'Gemma2',
+    'Gemma3',
     'Gemma3ConditionalGeneration',
-    'Gemma4', 
-    'Gemma4Unified', 
+    'Gemma4',
+    'Gemma4Unified',
     'DiffusionGemma'
 ]

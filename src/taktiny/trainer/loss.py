@@ -14,23 +14,24 @@
 """Loss functions for TakTiny trainers."""
 
 from __future__ import annotations
-
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
 from taktiny.cosettes._common import TransformerContext
+from taktiny.utils.typing import Array, ArrayLike, Batch
 
 
 def cross_entropy_loss(
-    logits,
-    labels,
+    logits: ArrayLike,
+    labels: ArrayLike,
     *,
-    mask=None,
+    mask: ArrayLike | None = None,
     ignore_index: int = -100,
     reduction: str = 'mean',
-):
+) -> Array:
     """Compute stable integer-label cross entropy.
 
     Args:
@@ -92,11 +93,11 @@ def cross_entropy_loss(
 
 
 def causal_lm_loss(
-    model,
-    batch,
+    model: Callable[..., Any],
+    batch: Batch,
     *,
     ignore_index: int = -100,
-):
+) -> Array:
     """Compute next-token loss for a TakTiny causal language model.
 
     ``batch`` must contain ``input_ids`` and ``labels``. Optional

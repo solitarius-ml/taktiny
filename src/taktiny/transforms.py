@@ -55,7 +55,7 @@ def _add_mapped_axis(module: Module, axis: int) -> None:
             parameter.quantization_batch_axis_count += 1
 
 
-def _update_output_axes(output, out_axes) -> None:
+def _update_output_axes(output: Any, out_axes: Any) -> None:
     if out_axes is None:
         return
 
@@ -94,7 +94,7 @@ def vmap(
     axis_size: int | None = None,
     spmd_axis_name: Any | tuple[Any, ...] | None = None,
     sum_match: bool = False,
-):
+) -> Any:
     """Vectorize a function using :func:`jax.vmap`.
 
     The function can be supplied directly or through decorator syntax.
@@ -106,7 +106,7 @@ def vmap(
         ...     return x + 1
     """
 
-    def transform(function):
+    def transform(function: Any) -> Any:
         mapped = jax.vmap(
             function,
             in_axes=in_axes,
@@ -118,7 +118,7 @@ def vmap(
         )
 
         @wraps(function)
-        def transformed(*args, **kwargs):
+        def transformed(*args: Any, **kwargs: Any) -> Any:
             output = mapped(*args, **kwargs)
             _update_output_axes(output, out_axes)
             return output
@@ -139,7 +139,7 @@ def scan(
     reverse: bool = False,
     unroll: int | bool = 1,
     _split_transpose: bool = False,
-):
+) -> Any:
     """Transform a scan body into a callable using :func:`jax.lax.scan`.
 
     The transformed function accepts ``(init, xs, *args, **kwargs)``. Extra
@@ -154,15 +154,15 @@ def scan(
         ...     return carry + x, carry
     """
 
-    def transform(function):
+    def transform(function: Any) -> Any:
         if not callable(function):
             raise TypeError(
                 f'fun must be callable, got {type(function).__name__}'
             )
 
         @wraps(function)
-        def scanned(init, xs=None, *args, **kwargs):
-            def body(carry, x):
+        def scanned(init: Any, xs: Any=None, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+            def body(carry: Any, x: Any) -> Any:
                 return function(carry, x, *args, **kwargs)
 
             carry, outputs = jax.lax.scan(

@@ -14,6 +14,8 @@
 """Llama architectures"""
 
 from __future__ import annotations
+from typing import Any
+
 
 from taktiny.maestro._livret import repertoire
 from taktiny.cosettes._common import TransformerCausalLM, TransformerConditionalGeneration
@@ -24,12 +26,12 @@ from taktiny import nn
 class Llama(TransformerCausalLM):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -46,12 +48,12 @@ class Llama(TransformerCausalLM):
 class Llama4(TransformerConditionalGeneration):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs,
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any,
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -64,7 +66,7 @@ class Llama4(TransformerConditionalGeneration):
             sharding_rules=sharding_rules,
             **kwargs,
         )
-    
+
 
 repertoire.register('LlamaForCausalLM', Llama)
 repertoire.register('Llama4ForConditionalGeneration', Llama4)

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 import os
 import json
@@ -49,7 +51,7 @@ class PretrainedModel(Module):
     checkpoint names and may expose default logical sharding rules.
     """
 
-    def _config_dict(self):
+    def _config_dict(self) -> Any:
         config = getattr(self, 'config', None)
         if config is None:
             return {}
@@ -64,7 +66,7 @@ class PretrainedModel(Module):
             if not key.startswith('_')
         }
 
-    def _save_config(self, path):
+    def _save_config(self, path: str) -> Any:
         config_path = os.path.join(path, 'config.json')
         with open(config_path, 'w') as config_file:
             json.dump(
@@ -76,13 +78,13 @@ class PretrainedModel(Module):
         return config_path
 
     @staticmethod
-    def _qtype_name(qtype):
+    def _qtype_name(qtype: Any) -> Any:
         if isinstance(qtype, str):
             return qtype
         return jnp.dtype(qtype).name
 
     @staticmethod
-    def _safetensors_qvalue(array):
+    def _safetensors_qvalue(array: Any) -> Any:
         dtype = array.dtype
         if jnp.issubdtype(dtype, jnp.signedinteger):
             storage_dtype = np.int8
@@ -97,7 +99,7 @@ class PretrainedModel(Module):
         return np.asarray(jax.device_get(array), dtype=storage_dtype)
 
     @classmethod
-    def _encode_qwix_state(cls, state):
+    def _encode_qwix_state(cls, state: Any) -> tuple[Any, ...]:
         encoded = {}
         parameters = {}
 
@@ -138,7 +140,7 @@ class PretrainedModel(Module):
         return encoded, metadata
 
     @staticmethod
-    def _decode_qwix_state(state, metadata):
+    def _decode_qwix_state(state: Any, metadata: Any) -> Any:
         if metadata is None:
             return state
         if (
@@ -209,12 +211,12 @@ class PretrainedModel(Module):
             )
         return decoded
 
-    def _lora_state_dict(self):
+    def _lora_state_dict(self) -> Any:
         from taktiny.nn.lora import LoRALinear
 
         state = {}
 
-        def collect(module, prefix=''):
+        def collect(module: Any, prefix: str='') -> None:
             for name, child in iter_children(module):
                 full_name = f'{prefix}.{name}' if prefix else name
                 if isinstance(child, LoRALinear):
@@ -227,8 +229,8 @@ class PretrainedModel(Module):
         return state
 
     @staticmethod
-    def _host_state_snapshot(state):
-        def copy_leaf(value):
+    def _host_state_snapshot(state: Any) -> Any:
+        def copy_leaf(value: Any) -> Any:
             value = jax.device_get(value)
             if isinstance(value, np.ndarray):
                 return np.array(value, copy=True)
@@ -236,7 +238,7 @@ class PretrainedModel(Module):
 
         return jax.tree.map(copy_leaf, state)
 
-    def _checkpoint_snapshot(self):
+    def _checkpoint_snapshot(self) -> dict[Any, Any]:
         """Capture stable host state for background checkpoint writing."""
         adapter_state = self._expand_stacked_state_dict(
             self._lora_state_dict()
@@ -265,11 +267,11 @@ class PretrainedModel(Module):
     @classmethod
     def _save_pretrained_snapshot(
         cls,
-        snapshot,
-        path,
+        snapshot: Any,
+        path: str,
         *,
-        max_shard_size='5GB',
-    ):
+        max_shard_size: str='5GB',
+    ) -> tuple[Any, ...]:
         os.makedirs(path, exist_ok=True)
         model_config_path = os.path.join(path, 'config.json')
         with open(model_config_path, 'w') as config_file:
@@ -329,7 +331,7 @@ class PretrainedModel(Module):
         )
 
     @staticmethod
-    def _expand_stacked_state_dict(state):
+    def _expand_stacked_state_dict(state: Any) -> Any:
         layout = []
         stacked_groups = {}
 
@@ -382,13 +384,13 @@ class PretrainedModel(Module):
 
     @staticmethod
     def _save_safetensors(
-        state,
-        path,
-        filename,
+        state: Any,
+        path: str,
+        filename: Any,
         *,
-        max_shard_size,
-        always_write_index=False,
-    ):
+        max_shard_size: int,
+        always_write_index: bool=False,
+    ) -> Any:
         stem, extension = os.path.splitext(filename)
         split = split_state_dict_into_shards_factory(
             state,
@@ -438,7 +440,7 @@ class PretrainedModel(Module):
 
         return tuple(saved_paths)
 
-    def save_pretrained(self, path, max_shard_size='5GB'):
+    def save_pretrained(self, path: str, max_shard_size: str='5GB') -> Any:
         """Save a full model checkpoint or the model's LoRA adapters.
 
         Models containing ``LoRALinear`` modules save only adapter tensors and
@@ -464,7 +466,7 @@ class PretrainedModel(Module):
             max_shard_size=max_shard_size,
         )
 
-    def load_pretrained(self, path):
+    def load_pretrained(self, path: str) -> Any:
         """Load a Taktiny-native full checkpoint into this model in place.
 
         This is the inverse of ``save_pretrained`` for full-model checkpoints.
@@ -632,7 +634,7 @@ class PretrainedModel(Module):
             if isinstance(value, qwix.QArray):
                 target = parameter.value
 
-                def place(component, target_component=None):
+                def place(component: Any, target_component: Any=None) -> Any:
                     component = jnp.asarray(component)
                     sharding = getattr(target_component, 'sharding', None)
                     if sharding is not None:
@@ -664,15 +666,15 @@ class PretrainedModel(Module):
 
     def push_to_hub(
         self,
-        repo_id,
+        repo_id: str,
         *,
-        commit_message=None,
-        commit_description=None,
-        private=None,
-        token=None,
-        revision=None,
-        create_pr=False,
-        max_shard_size='5GB',
+        commit_message: Any=None,
+        commit_description: Any=None,
+        private: Any=None,
+        token: Any=None,
+        revision: Any=None,
+        create_pr: bool=False,
+        max_shard_size: str='5GB',
     ) -> str:
         """Save and upload this model or adapter to the Hugging Face Hub.
 
@@ -756,18 +758,18 @@ class PretrainedModel(Module):
 
     @classmethod
     def from_pretrained(
-        cls, 
-        path_or_repo, 
-        config, 
-        module_map=None, 
-        local=False, 
-        dtype=None, 
-        quant=None,
-        subfolder=None, 
-        mesh=None, 
-        sharding_rules=None, 
-        **kwargs
-    ):
+        cls,
+        path_or_repo: Any,
+        config: Any,
+        module_map: Any=None,
+        local: bool=False,
+        dtype: Any=None,
+        quant: Any=None,
+        subfolder: Any=None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> Any:
         """
         Loads safetensors weights into a newly instantiated model.
         Supports both single-file (model.safetensors) and sharded models.
@@ -919,11 +921,11 @@ class PretrainedModel(Module):
         default_device = jax.devices()[0]
 
         def parameter_sharding(
-            parameter,
-            axis_names=None,
+            parameter: Any,
+            axis_names: Any=None,
             *,
-            use_explicit=True,
-        ):
+            use_explicit: bool=True,
+        ) -> Any:
             sharding = (
                 getattr(parameter, 'sharding', None)
                 if use_explicit
@@ -945,7 +947,7 @@ class PretrainedModel(Module):
                 sharding = default_device
             return sharding
 
-        def place_qarray(value, parameter):
+        def place_qarray(value: Any, parameter: Any) -> Any:
             axis_names = getattr(parameter, 'axis_names', None)
             qvalue_sharding = parameter_sharding(parameter, axis_names)
 
@@ -990,7 +992,7 @@ class PretrainedModel(Module):
                 zero_point=zero_point,
             )
 
-        def parameter_quantization_rule(key, parameter):
+        def parameter_quantization_rule(key: Any, parameter: Any) -> tuple[Any, ...]:
             quantization = getattr(parameter, 'quantization', None)
             quantization_kind = getattr(
                 parameter,
@@ -1004,7 +1006,7 @@ class PretrainedModel(Module):
             )
             return rule, quantization_kind
 
-        def materialize_parameter(key, value, parameter):
+        def materialize_parameter(key: Any, value: Any, parameter: Any) -> Any:
             rule, quantization_kind = parameter_quantization_rule(
                 key,
                 parameter,
@@ -1037,7 +1039,7 @@ class PretrainedModel(Module):
                 ),
             )
 
-        def initialize_stacked_parameter(parameter):
+        def initialize_stacked_parameter(parameter: Any) -> Any:
             sharding = parameter_sharding(
                 parameter,
                 getattr(parameter, 'axis_names', None),
@@ -1051,7 +1053,7 @@ class PretrainedModel(Module):
                 )()
             return jax.device_put(jnp.zeros(shape, dtype=dtype), sharding)
 
-        def update_stacked_parameter(stacked, layer, layer_index):
+        def update_stacked_parameter(stacked: Any, layer: Any, layer_index: int) -> Any:
             return jax.lax.dynamic_update_index_in_dim(
                 stacked,
                 layer,
@@ -1093,7 +1095,7 @@ class PretrainedModel(Module):
                 for k_mapped, value in mapped_items:
                     if k_mapped in current_state_dict:
                         target_var = current_state_dict[k_mapped]
-                        
+
                         if value.ndim == 2:
                             if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                 value = value.T
@@ -1111,17 +1113,17 @@ class PretrainedModel(Module):
                         if match:
                             idx = int(match.group(1))
                             k_stacked = k_mapped[:match.start()] + '.stacked.' + k_mapped[match.end():]
-                            
+
                             if k_stacked in current_state_dict:
                                 target_var = current_state_dict[k_stacked]
-                                
+
                                 layer_shape = target_var.shape[1:]
                                 if value.ndim == 2:
                                     if k_mapped.endswith(".weight") or ".lora_" in k_mapped:
                                         value = value.T
                                 if value.shape != layer_shape:
                                     value = value.reshape(layer_shape)
-                                    
+
                                 stacked_state = stacked_states.get(k_stacked)
                                 if stacked_state is None:
                                     rule, quantization_kind = (
@@ -1232,7 +1234,7 @@ class PretrainedModel(Module):
                                     )
                                     stacked_state['indices'].add(idx)
                                 continue
-                                
+
                         not_found_some = True
                         print(f"Warning: mapped key {k_mapped} found in checkpoint but not in model.")
 
@@ -1288,5 +1290,5 @@ class PretrainedModel(Module):
         state.load_flat_state_dict(new_state)
         state.base_model_name_or_path = path_or_repo_str
         return state
-    
+
 __all__ = ['PretrainedModel']

@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Shared helpers for Tokamax ring-family Splash attention kernels."""
+from __future__ import annotations
+
+from typing import Any
+
 
 import jax
 from jax import lax
@@ -26,7 +30,7 @@ MaskInfo = mask_info_lib.MaskInfo
 def dynamic_slice_mask_info(mask_info: MaskInfo, kv_shard_idx: jax.Array, ring_size: int) -> MaskInfo:
   """Slices MaskInfo for the current ring step."""
 
-  def slice_if_exists(arr: jax.Array | None):
+  def slice_if_exists(arr: jax.Array | None) -> Any:
     if arr is None:
       return None
 

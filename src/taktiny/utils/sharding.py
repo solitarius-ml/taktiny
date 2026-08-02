@@ -15,13 +15,17 @@
 
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """Utilities for sharding and JIT partitioning in Taktiny."""
+from __future__ import annotations
+
+from typing import Any
+
 
 from jax.sharding import NamedSharding, PartitionSpec as P
 import jax
 from taktiny.utils import spmd
 
 
-def remove_size_one_mesh_axis(spec, mesh):
+def remove_size_one_mesh_axis(spec: Any, mesh: Any) -> Any:
   """
   Removes mesh axes from a PartitionSpec (P) where the axis size is 1.
 
@@ -41,13 +45,13 @@ def remove_size_one_mesh_axis(spec, mesh):
       new_spec.append(None if mesh.shape.get(s, 1) == 1 else s)  # type: ignore
   return P(*new_spec, unreduced=spec.unreduced, reduced=spec.reduced)
 
-def logical_to_mesh_axes(logical_names, mesh, rules=None):
+def logical_to_mesh_axes(logical_names: Any, mesh: Any, rules: Any=None) -> Any:
   """Remove size one mesh axes given logical names."""
   tensor_spec = spmd.logical_to_mesh_axes(logical_names, rules=rules)
   return remove_size_one_mesh_axis(tensor_spec, mesh)
 
 
-def logical_to_mesh(tree, mesh, rules=None):
+def logical_to_mesh(tree: Any, mesh: Any, rules: Any=None) -> Any:
   """Remove size one mesh axes given logical pspec pytree."""
   if tree is None:
     return None
@@ -58,7 +62,7 @@ def logical_to_mesh(tree, mesh, rules=None):
   )
 
 
-def logical_to_mesh_sharding(tree, mesh, rules=None):
+def logical_to_mesh_sharding(tree: Any, mesh: Any, rules: Any=None) -> Any:
   """Return sharding pytree given logical specs pytree"""
   if tree is None:
     return None
@@ -69,7 +73,7 @@ def logical_to_mesh_sharding(tree, mesh, rules=None):
   )
 
 
-def create_sharding(mesh, logical_names, rules=None):
+def create_sharding(mesh: Any, logical_names: Any, rules: Any=None) -> Any:
   """Create NamedSharding with given logical names."""
   return NamedSharding(mesh, logical_to_mesh_axes(logical_names, mesh, rules=rules))
 

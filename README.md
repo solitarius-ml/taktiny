@@ -21,7 +21,7 @@ coverage may change between revisions.
 
 ## Requirements
 
-- Python 3.11 or newer
+- Python 3.12 or newer
 - JAX 0.10.2 or newer
 
 ## Testing

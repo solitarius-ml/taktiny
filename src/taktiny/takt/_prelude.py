@@ -18,16 +18,20 @@ from __future__ import annotations
 from collections.abc import Callable
 import json
 import os
-from typing import Any
+from typing import Any, TypeVar
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import EntryNotFoundError
 from safetensors import safe_open
 
+from taktiny.nn import Rngs
 from taktiny.nn.module import Module, iter_children
+from taktiny.utils.typing import DType, PathLike
+
+M = TypeVar('M', bound=Module)
 
 
-def _replace_child(parent, name, child):
+def _replace_child(parent: Module, name: str, child: Module) -> None:
     if name.isdigit() and hasattr(parent, 'layers'):
         position = int(name)
         if isinstance(parent.layers, tuple):
@@ -67,7 +71,7 @@ class Takt:
     _peft_loaders: dict[str, Callable[..., Any]] = {}
 
     @classmethod
-    def register_peft(cls, config_type: type):
+    def register_peft(cls, config_type: type) -> Any:
         """Register an implementation for a PEFT configuration type.
 
         Args:
@@ -81,7 +85,7 @@ class Takt:
                 registered implementation.
         """
 
-        def decorator(implementation):
+        def decorator(implementation: Any) -> Any:
             registered = cls._peft_methods.get(config_type)
             if registered is not None and registered is not implementation:
                 raise ValueError(
@@ -94,10 +98,10 @@ class Takt:
         return decorator
 
     @classmethod
-    def register_peft_merger(cls, module_type: type):
+    def register_peft_merger(cls, module_type: type) -> Any:
         """Register the merge implementation for a PEFT wrapper module."""
 
-        def decorator(implementation):
+        def decorator(implementation: Any) -> Any:
             registered = cls._peft_mergers.get(module_type)
             if registered is not None and registered is not implementation:
                 raise ValueError(
@@ -110,11 +114,11 @@ class Takt:
         return decorator
 
     @classmethod
-    def register_peft_loader(cls, peft_type: str):
+    def register_peft_loader(cls, peft_type: str) -> Any:
         """Register a checkpoint loader for a serialized PEFT type."""
         normalized_type = peft_type.upper()
 
-        def decorator(implementation):
+        def decorator(implementation: Any) -> Any:
             registered = cls._peft_loaders.get(normalized_type)
             if registered is not None and registered is not implementation:
                 raise ValueError(
@@ -126,7 +130,7 @@ class Takt:
         return decorator
 
     @classmethod
-    def apply_peft(cls, model, config):
+    def apply_peft(cls, model: M, config: Any) -> M:
         """Apply a PEFT configuration to a model in place.
 
         The registered implementation may replace modules inside ``model``.
@@ -163,15 +167,15 @@ class Takt:
     @classmethod
     def load_peft(
         cls,
-        model,
-        path_or_repo,
+        model: M,
+        path_or_repo: PathLike,
         *,
-        local=None,
-        token=None,
-        revision=None,
-        subfolder=None,
-        rngs=None,
-    ):
+        local: bool | None = None,
+        token: str | bool | None = None,
+        revision: str | None = None,
+        subfolder: PathLike | None = None,
+        rngs: Rngs | None = None,
+    ) -> M:
         """Load a saved PEFT adapter into an existing base model.
 
         Local directories are detected automatically. Hub repositories support
@@ -200,14 +204,14 @@ class Takt:
         if local is None:
             local = os.path.isdir(source)
 
-        def local_path(filename):
+        def local_path(filename: str) -> str:
             parts = [source]
             if subfolder:
                 parts.append(os.fspath(subfolder))
             parts.append(filename)
             return os.path.join(*parts)
 
-        def resolve(filename):
+        def resolve(filename: str) -> str:
             if local:
                 resolved = local_path(filename)
                 if not os.path.isfile(resolved):
@@ -284,7 +288,13 @@ class Takt:
         )
 
     @classmethod
-    def merge_peft(cls, model, *, dtype=None, quant=None):
+    def merge_peft(
+        cls,
+        model: M,
+        *,
+        dtype: DType | str | None = None,
+        quant: Any = None,
+    ) -> M:
         """Merge PEFT adapter weights into their base modules in place.
 
         Adapter calculations are performed in float32. ``dtype`` controls the
@@ -313,7 +323,7 @@ class Takt:
 
         merged = []
 
-        def merger_for(module):
+        def merger_for(module: Module) -> Callable[..., Module] | None:
             implementation = cls._peft_mergers.get(type(module))
             if implementation is not None:
                 return implementation
@@ -326,7 +336,7 @@ class Takt:
                 None,
             )
 
-        def transform(module, prefix=''):
+        def transform(module: Module, prefix: str = '') -> None:
             for name, child in list(iter_children(module)):
                 full_name = f'{prefix}.{name}' if prefix else name
                 implementation = merger_for(child)

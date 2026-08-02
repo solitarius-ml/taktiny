@@ -14,6 +14,8 @@
 """Qwen architectures"""
 
 from __future__ import annotations
+from typing import Any
+
 
 import numpy as np
 
@@ -34,12 +36,12 @@ from taktiny import nn
 class Qwen(TransformerCausalLM):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -86,18 +88,18 @@ class Qwen(TransformerCausalLM):
     @classmethod
     def from_pretrained(
         cls,
-        path_or_repo,
-        mesh=None,
-        sharding_rules=None,
-        local=False,
-        **kwargs,
-    ):
+        path_or_repo: Any,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        local: bool=False,
+        **kwargs: Any,
+    ) -> Any:
         if 'config' in kwargs:
             config = kwargs.pop('config')
         else:
             config = ModelConfig.load_config(path_or_repo, local=local)
 
-        def split_qkv(value):
+        def split_qkv(value: Any) -> Any:
             return np.split(value, 3, axis=0)
 
         module_map = [
@@ -139,12 +141,12 @@ class Qwen(TransformerCausalLM):
 class Qwen2(TransformerCausalLM):
     def __init__(
         self,
-        config,
-        rngs: nn.Rngs = None,
-        mesh=None,
-        sharding_rules=None,
-        **kwargs
-    ):
+        config: Any,
+        rngs: nn.Rngs | None = None,
+        mesh: Any=None,
+        sharding_rules: Any=None,
+        **kwargs: Any
+    ) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
 
@@ -160,7 +162,7 @@ class Qwen2(TransformerCausalLM):
 
 
 class Qwen3(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -174,7 +176,7 @@ class Qwen3(TransformerCausalLM):
         )
 
 class Qwen3MoE(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -189,7 +191,7 @@ class Qwen3MoE(TransformerCausalLM):
 
 
 class Qwen3Next(TransformerCausalLM):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(
@@ -204,7 +206,7 @@ class Qwen3Next(TransformerCausalLM):
 
 
 class Qwen3_5MoE(TransformerConditionalGeneration):
-    def __init__(self, config, rngs: nn.Rngs = None, mesh=None, sharding_rules=None, **kwargs):
+    def __init__(self, config: Any, rngs: nn.Rngs | None = None, mesh: Any=None, sharding_rules: Any=None, **kwargs: Any) -> None:
         if rngs is None:
             rngs = nn.Rngs(42)
         super().__init__(

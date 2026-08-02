@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 import math
 from typing import Literal, Optional, Union
@@ -39,13 +41,13 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
         base_image_seq_len: int = 256,
         max_image_seq_len: int = 4096,
         invert_sigmas: bool = False,
-        shift_terminal: float = None,
+        shift_terminal: float | None = None,
         use_karras_sigmas: bool = False,
         use_exponential_sigmas: bool = False,
         use_beta_sigmas: bool = False,
         time_shift_type: Literal["exponential", "linear"] = "exponential",
         stochastic_sampling: bool = False,
-    ):
+    ) -> None:
         self.num_train_timesteps = num_train_timesteps
         self.shift = shift
         self.use_dynamic_shifting = use_dynamic_shifting
@@ -66,7 +68,7 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
 
         timesteps = jnp.linspace(1, num_train_timesteps, num_train_timesteps, dtype=jnp.float32)[::-1]
         sigmas = timesteps / num_train_timesteps
-        
+
         if not use_dynamic_shifting:
             sigmas = shift * sigmas / (1 + (shift - 1) * sigmas)
 
@@ -77,7 +79,7 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
 
         self.step_index = None
 
-    def _sigma_to_t(self, sigma) -> float:
+    def _sigma_to_t(self, sigma: Any) -> float:
         return sigma * self.num_train_timesteps
 
     def time_shift(self, mu: float, sigma: float, t: jnp.ndarray) -> jnp.ndarray:
@@ -95,10 +97,10 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
     def set_timesteps(
         self,
         num_inference_steps: int,
-        mu: float = None,
+        mu: float | None = None,
         sigmas: list[float] | None = None,
         timesteps: list[float] | None = None,
-    ):
+    ) -> None:
         if self.use_dynamic_shifting and mu is None:
             raise ValueError("`mu` must be passed when `use_dynamic_shifting` is set to be `True`")
 
@@ -169,7 +171,7 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
         self, in_sigmas: jnp.ndarray, num_inference_steps: int, alpha: float = 0.6, beta: float = 0.6
     ) -> jnp.ndarray:
         import scipy.stats
-        
+
         sigma_min = float(in_sigmas[-1])
         sigma_max = float(in_sigmas[0])
 
@@ -192,7 +194,7 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
         generator: Optional[jax.Array] = None,
         return_dict: bool = False,
     ) -> tuple:
-        
+
         if self.step_index is None:
             # Initialize step index based on closest timestep
             diffs = jnp.abs(self.timesteps - timestep)
@@ -216,7 +218,7 @@ class FlowMatchEulerDiscreteScheduler(nn.Module):
 
         if not return_dict:
             return (prev_sample,)
-        
+
         return prev_sample
 
     def __len__(self) -> int:

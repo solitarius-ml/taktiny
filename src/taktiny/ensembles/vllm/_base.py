@@ -16,7 +16,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from types import TracebackType
+from typing import Any, Protocol, Self, runtime_checkable
 
 
 @runtime_checkable
@@ -31,15 +32,15 @@ class VLLMEngine(Protocol):
     def start(self) -> None:
         """Start the inference runtime and make it ready for requests."""
 
-    def generate(self, *args, **kwargs):
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
         """Generate completions using the currently synchronized policy."""
 
     def sync(
         self,
-        model,
+        model: Any,
         *,
         policy_version: int,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Synchronize ``model`` into the inference runtime."""
 
@@ -74,13 +75,13 @@ class VLLM:
 
     def __init__(
         self,
-        model,
+        model: Any,
         *,
         engine: VLLMEngine | None = None,
         engine_factory: Callable[..., VLLMEngine] | None = None,
         auto_start: bool = True,
         **engine_options: Any,
-    ):
+    ) -> None:
         if model is None:
             raise ValueError('model is required')
         if engine is not None and engine_factory is not None:
@@ -104,7 +105,7 @@ class VLLM:
             self.start()
 
     @staticmethod
-    def _validate_engine(engine):
+    def _validate_engine(engine: Any) -> VLLMEngine:
         missing = [
             name
             for name in ('start', 'generate', 'sync', 'close')
@@ -118,7 +119,7 @@ class VLLM:
             )
         return engine
 
-    def _create_engine(self):
+    def _create_engine(self) -> VLLMEngine:
         engine_factory = self._engine_factory
         if engine_factory is None:
             from ._local import LocalVLLMEngine
@@ -130,7 +131,7 @@ class VLLM:
         )
         return self._validate_engine(engine)
 
-    def _require_open(self):
+    def _require_open(self) -> None:
         if self._closed:
             raise RuntimeError('vLLM runtime is closed')
 
@@ -162,7 +163,7 @@ class VLLM:
         """Whether this wrapper has been permanently closed."""
         return self._closed
 
-    def start(self):
+    def start(self) -> Self:
         """Start the underlying engine once and return this wrapper."""
         self._require_open()
         if not self._started:
@@ -170,7 +171,7 @@ class VLLM:
             self._started = True
         return self
 
-    def generate(self, *args, **kwargs):
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
         """Generate through vLLM using its current policy weights."""
         self.start()
         return self.engine.generate(*args, **kwargs)
@@ -179,7 +180,7 @@ class VLLM:
         self,
         *,
         policy_version: int | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> int:
         """Synchronize the trainable model into vLLM.
 
@@ -224,8 +225,13 @@ class VLLM:
         self._started = False
         self._closed = True
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self.start()
 
-    def __exit__(self, exc_type, exc_value, traceback):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None:
         self.close()

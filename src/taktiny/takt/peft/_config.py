@@ -33,7 +33,7 @@ class LoraConfig(PeftConfig):
     alpha: float = 8.0
     rngs: Rngs | None = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         targets = (
             (self.target_modules,)
             if isinstance(self.target_modules, str)

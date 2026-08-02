@@ -14,6 +14,8 @@
 """Local offline vLLM engine for TakTiny token generation."""
 
 from __future__ import annotations
+from typing import Any
+
 
 import importlib
 import os
@@ -23,7 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def _config_value(config, name):
+def _config_value(config: Any, name: str) -> Any:
     if config is None:
         return None
     if isinstance(config, dict):
@@ -31,7 +33,7 @@ def _config_value(config, name):
     return getattr(config, name, None)
 
 
-def _model_source(model, explicit_source=None):
+def _model_source(model: Any, explicit_source: Any=None) -> Any:
     if explicit_source is not None:
         return os.fspath(explicit_source)
 
@@ -51,7 +53,7 @@ def _model_source(model, explicit_source=None):
     )
 
 
-def _token_ids(value):
+def _token_ids(value: Any) -> Any:
     if value is None:
         return None
     if isinstance(value, (str, bytes)):
@@ -69,18 +71,18 @@ class LocalVLLMEngine:
 
     def __init__(
         self,
-        model,
+        model: Any,
         *,
-        platform='auto',
-        model_path=None,
-        use_tqdm=False,
-        sync_adapter=None,
-        weight_mapper=None,
-        sync_packed=True,
-        sync_buffer_size=None,
-        sync_device=None,
-        **llm_options,
-    ):
+        platform: str='auto',
+        model_path: str | None=None,
+        use_tqdm: bool=False,
+        sync_adapter: Any=None,
+        weight_mapper: Any=None,
+        sync_packed: bool=True,
+        sync_buffer_size: int | None=None,
+        sync_device: Any=None,
+        **llm_options: Any,
+    ) -> None:
         if platform == 'auto':
             platform = jax.default_backend()
         if platform not in ('gpu', 'tpu'):
@@ -118,13 +120,13 @@ class LocalVLLMEngine:
         self._weight_sync = None
 
     @property
-    def llm(self):
+    def llm(self) -> Any:
         """Return the underlying ``vllm.LLM`` instance after startup."""
         if self._llm is None:
             raise RuntimeError('vLLM engine has not been started')
         return self._llm
 
-    def _import_vllm(self):
+    def _import_vllm(self) -> tuple[Any, ...]:
         try:
             module = importlib.import_module('vllm')
         except ModuleNotFoundError as error:
@@ -145,7 +147,7 @@ class LocalVLLMEngine:
             )
         return llm_cls, sampling_params_cls
 
-    def start(self):
+    def start(self) -> None:
         if self._llm is not None:
             return
         llm_cls, self._sampling_params_cls = self._import_vllm()
@@ -183,7 +185,7 @@ class LocalVLLMEngine:
             **options,
         )
 
-    def _prepare_inputs(self, input_ids, attention_mask):
+    def _prepare_inputs(self, input_ids: Any, attention_mask: Any) -> tuple[Any, ...]:
         input_ids = np.asarray(jax.device_get(input_ids))
         if input_ids.ndim != 2:
             raise ValueError(
@@ -222,14 +224,14 @@ class LocalVLLMEngine:
     def _sampling_params(
         self,
         *,
-        max_new_tokens,
-        temperature,
-        top_k,
-        top_p,
-        seed,
-        repetition_penalty,
-        eos_token_id,
-    ):
+        max_new_tokens: Any,
+        temperature: Any,
+        top_k: Any,
+        top_p: Any,
+        seed: int,
+        repetition_penalty: Any,
+        eos_token_id: Any,
+    ) -> Any:
         if not isinstance(top_k, int) or top_k < 0:
             raise ValueError('top_k must be a non-negative integer')
         if not 0 < top_p <= 1:
@@ -257,13 +259,13 @@ class LocalVLLMEngine:
 
     def _normalize_outputs(
         self,
-        input_ids,
-        outputs,
+        input_ids: Any,
+        outputs: Any,
         *,
-        pad_token_id,
-        eos_token_id,
-        max_new_tokens,
-    ):
+        pad_token_id: Any,
+        eos_token_id: Any,
+        max_new_tokens: Any,
+    ) -> Any:
         batch_size = input_ids.shape[0]
         if len(outputs) != batch_size:
             raise RuntimeError(
@@ -325,18 +327,18 @@ class LocalVLLMEngine:
 
     def generate(
         self,
-        input_ids,
-        max_new_tokens,
-        temperature=1.0,
-        top_k=50,
-        top_p=1.0,
-        seed=42,
-        attention_mask=None,
-        repetition_penalty=1.0,
-        eos_token_id=None,
-        pad_token_id=None,
-        streamer=None,
-    ):
+        input_ids: Any,
+        max_new_tokens: Any,
+        temperature: float=1.0,
+        top_k: int=50,
+        top_p: float=1.0,
+        seed: int=42,
+        attention_mask: Any=None,
+        repetition_penalty: float=1.0,
+        eos_token_id: Any=None,
+        pad_token_id: Any=None,
+        streamer: Any=None,
+    ) -> Any:
         if not isinstance(max_new_tokens, int) or max_new_tokens < 0:
             raise ValueError(
                 'max_new_tokens must be a non-negative integer'
@@ -375,7 +377,7 @@ class LocalVLLMEngine:
             max_new_tokens=max_new_tokens,
         )
 
-    def sync(self, model, *, policy_version, **kwargs):
+    def sync(self, model: Any, *, policy_version: Any, **kwargs: Any) -> None:
         if self._llm is None or self._weight_sync is None:
             raise RuntimeError('vLLM engine has not been started')
         sync = getattr(self._weight_sync, 'sync', None)
@@ -390,7 +392,7 @@ class LocalVLLMEngine:
             **kwargs,
         )
 
-    def close(self):
+    def close(self) -> None:
         if self._llm is None:
             return
 

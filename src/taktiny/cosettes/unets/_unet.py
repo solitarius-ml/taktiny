@@ -16,6 +16,8 @@
 # TODO(refactor).
 
 from __future__ import annotations
+from typing import Any
+
 
 from taktiny.layers.resnet import (
     Downsample2D,
@@ -29,7 +31,7 @@ from taktiny.layers.resnet import (
 )
 from taktiny import nn
 from taktiny.utils import logging
-# from taktiny.cosettes.unets._unet import 
+# from taktiny.cosettes.unets._unet import
 
 import jax, jax.numpy as jnp
 
@@ -61,7 +63,7 @@ def get_down_block(
     attention_head_dim: int | None = None,
     downsample_type: str | None = None,
     dropout: float = 0.0,
-):
+) -> Any:
     # If attn head dim is not defined, we default it to the number of heads
     if attention_head_dim is None:
         logger.warning(
@@ -265,7 +267,7 @@ def get_mid_block(
     cross_attention_norm: str | None = None,
     attention_head_dim: int | None = 1,
     dropout: float = 0.0,
-):
+) -> Any:
     if mid_block_type == "UNetMidBlock2DCrossAttn":
         return UNetMidBlock2DCrossAttn(
             transformer_layers_per_block=transformer_layers_per_block,
@@ -590,7 +592,7 @@ class UNetMidBlock2D(nn.Module):
         add_attention: bool = True,
         attention_head_dim: int = 1,
         output_scale_factor: float = 1.0,
-    ):
+    ) -> None:
         resnet_groups = resnet_groups if resnet_groups is not None else min(in_channels // 4, 32)
         self.add_attention = add_attention
 
@@ -721,7 +723,7 @@ class DownBlock2D(nn.Module):
         output_scale_factor: float = 1.0,
         add_downsample: bool = True,
         downsample_padding: int = 1,
-    ):
+    ) -> None:
         super().__init__()
         resnets = []
 
@@ -758,8 +760,12 @@ class DownBlock2D(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(
-        self, hidden_states: torch.Tensor, temb: torch.Tensor | None = None, *args, **kwargs
-    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        self,
+        hidden_states: jax.Array,
+        temb: jax.Array | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
         if len(args) > 0 or kwargs.get("scale", None) is not None:
             deprecation_message = "The `scale` argument is deprecated and will be ignored. Please remove it, as passing it will raise an error in the future. `scale` should directly be passed while calling the underlying pipeline component i.e., via `cross_attention_kwargs`."
             deprecate("scale", "1.0.0", deprecation_message)

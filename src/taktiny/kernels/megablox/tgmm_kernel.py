@@ -17,6 +17,8 @@
 # https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
 # tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py
 """TGMM kernel"""
+from __future__ import annotations
+
 
 import dataclasses
 import functools
@@ -113,7 +115,7 @@ def calculate_tgmm_tiling(
   tile_n_lower_bound = min(tile_n_lower_bound, dims.size_n)
   tile_k = gmm_v2.align_to(dims.size_k, num_lanes)
 
-  def within_vmem_limit(tile_m, tile_k, tile_n):
+  def within_vmem_limit(tile_m: Any, tile_k: Any, tile_n: Any) -> Any:
     acc_bytes = jax.dtypes.itemsize_bits(acc_dtype) // 8
     out_bytes = jax.dtypes.itemsize_bits(out_dtype) // 8
     lhs_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
@@ -193,7 +195,7 @@ def make_tgmm_configs(
     out_dtype: jnp.dtype,
     acc_dtype: jnp.dtype | None,
     target_zero_ref_bytes: int,
-):
+) -> Any:
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
   assert lhs.shape[0] == rhs.shape[0], (
@@ -293,7 +295,7 @@ def tgmm_inner_kernel(
     metadata_ref: gmm_v2.MetadataRef,
     *,
     cfgs: gmm_v2.GmmConfigs,
-):
+) -> None:
   """Inner kernel for TGMM computation.
 
   This kernel performs the matrix multiplication for a single tile of the output
@@ -316,7 +318,7 @@ def tgmm_inner_kernel(
   tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
   gm_id = pl.program_id(2)
 
-  def _matmul(is_new_group: bool, is_group_changing: bool):
+  def _matmul(is_new_group: bool, is_group_changing: bool) -> None:
 
     # Mask out invalid rows in the LHS/RHS tiles.
     # The DMA loads tiles aligned to sublane boundaries, but the actual group
@@ -357,19 +359,19 @@ def tgmm_inner_kernel(
       acc_ref[...] = acc
 
   @jax.named_scope("matmul_new_group_and_changing")
-  def matmul_new_group_and_changing():
+  def matmul_new_group_and_changing() -> None:
     _matmul(is_new_group=True, is_group_changing=True)
 
   @jax.named_scope("matmul_new_group")
-  def matmul_new_group():
+  def matmul_new_group() -> None:
     _matmul(is_new_group=True, is_group_changing=False)
 
   @jax.named_scope("matmul")
-  def matmul():
+  def matmul() -> None:
     _matmul(is_new_group=False, is_group_changing=False)
 
   @jax.named_scope("matmul_group_changing")
-  def matmul_group_changing():
+  def matmul_group_changing() -> None:
     _matmul(is_new_group=False, is_group_changing=True)
 
   prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
@@ -408,11 +410,11 @@ def tgmm_inner_kernel(
 class TgmmIndexMaps:
   """Index maps for TGMM kernel."""
 
-  def __init__(self, metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs):
+  def __init__(self, metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs) -> None:
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
 
-  def lhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+  def lhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array) -> tuple[Any, ...]:
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -421,7 +423,7 @@ class TgmmIndexMaps:
     row_size = row_end - row_start
     return (pl.ds(row_start, row_size), 0, k_id)
 
-  def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+  def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array) -> tuple[Any, ...]:
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -430,10 +432,10 @@ class TgmmIndexMaps:
     row_size = row_end - row_start
     return (pl.ds(row_start, row_size), 0, n_id)
 
-  def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+  def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array) -> tuple[Any, ...]:
     return (0, 0, n_id)
 
-  def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+  def out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array) -> tuple[Any, ...]:
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     return (group_id, k_id, n_id)
 
@@ -478,12 +480,12 @@ def generate_tgmm_block_specs(
 
 
 def zero_out_start(
-    lhs_group_sizes_ref,  # int32[size_lhs_group]
-    group_offset_ref,  # int32[1]
-    out_ref,  # [num_actual_groups, k, n]
-    zero_ref,  # [tile_zero_k, num_lanes]
-    semaphore_ref,  # [1]
-):
+    lhs_group_sizes_ref: Any,  # int32[size_lhs_group]
+    group_offset_ref: Any,  # int32[1]
+    out_ref: Any,  # [num_actual_groups, k, n]
+    zero_ref: Any,  # [tile_zero_k, num_lanes]
+    semaphore_ref: Any,  # [1]
+) -> Any:
   """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
   num_actual_groups, aligned_k, aligned_n = out_ref.shape
   tile_zero_k = zero_ref.shape[0]
@@ -493,7 +495,7 @@ def zero_out_start(
 
   zero_ref[...] = jnp.zeros_like(zero_ref)
 
-  def fill_zero(local_group_id, should_copy):
+  def fill_zero(local_group_id: Any, should_copy: Any) -> int:
     should_copy_int = should_copy.astype(int)
     for i in range(pl.cdiv(aligned_k, tile_zero_k)):
       size_k_to_copy = min(tile_zero_k, aligned_k - i * tile_zero_k)
@@ -523,10 +525,10 @@ def zero_out_start(
 
 
 def zero_out_end(
-    num_groups_to_zero,
-    out_ref,  # [num_actual_groups, k, n]
-    semaphore_ref,  # [1]
-):
+    num_groups_to_zero: Any,
+    out_ref: Any,  # [num_actual_groups, k, n]
+    semaphore_ref: Any,  # [1]
+) -> None:
   """Drain the DMAs started by zero_out_start."""
   dst = out_ref.at[pl.ds(0, num_groups_to_zero),]
   src = dst
@@ -538,20 +540,20 @@ def zero_out_end(
 
 
 def tgmm_kernel_main(
-    lhs_group_sizes_ref,  # int32[size_lhs_group]
-    group_offset_ref,  # int32[1]
-    lhs_ref,  # [m, k]
-    rhs_ref,  # OperandRef: .value [m, n], .scale [1, 1, n] or None
-    partial_sum_ref,  # [num_actual_groups, k, n] or None
-    out_ref,  # [num_actual_groups, k, n]
+    lhs_group_sizes_ref: Any,  # int32[size_lhs_group]
+    group_offset_ref: Any,  # int32[1]
+    lhs_ref: Any,  # [m, k]
+    rhs_ref: Any,  # OperandRef: .value [m, n], .scale [1, 1, n] or None
+    partial_sum_ref: Any,  # [num_actual_groups, k, n] or None
+    out_ref: Any,  # [num_actual_groups, k, n]
     # Scratch memory
     acc_ref: jax.Array,  # [tile_k, tile_n]
     metadata_ref: gmm_v2.MetadataRef,
     zero_ref: jax.Array,  # [tile_zero_k, num_lanes]
     semaphore_ref: jax.Array,  # [1]
     *,
-    cfgs,
-):
+    cfgs: Any,
+) -> None:
   """Main kernel function for TGMM computation.
 
   Args:
@@ -660,7 +662,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
-):
+) -> Any:
   """Computes a transposed grouped matrix multiplication.
 
   This kernel computes

@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Embedding modules"""
+from __future__ import annotations
+
+from typing import Any
+
 
 import jax
 import math
@@ -25,32 +29,32 @@ from taktiny.utils.typing import DType
 
 class Embedding(Module):
     def __init__(
-        self, num_embeddings: int, 
-        embedding_dim: int, *, 
-        rngs: Rngs = None, 
-        seed: Rngs = None, 
+        self, num_embeddings: int,
+        embedding_dim: int, *,
+        rngs: Rngs | None = None,
+        seed: Rngs | None = None,
         dtype: DType | str = jnp.float32,
-        initializer = normal(0.02),
-        quant=None,
-    ):
+        initializer: Any = normal(0.02),
+        quant: Any=None,
+    ) -> None:
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        
+
         if rngs is None and seed is None:
             raise ValueError("A rngs must be provided to initialize Embedding layer")
-            
+
         if rngs is None and seed is not None:
             import warnings
             warnings.warn('seed is deprecated. use `rngs` instead')
             rngs = seed
-            
+
         key = rngs()
         self.embedding = Parameter(
             initializer(key, (num_embeddings, embedding_dim), dtype)
         )
         self.embedding.quantization = quant
         self.embedding.quantization_kind = 'embedding'
-        
+
     def __call__(self, indices: jax.Array) -> jax.Array:
         table = self.embedding.value
         if isinstance(table, qwix.QArray):
@@ -62,9 +66,9 @@ class Embedding(Module):
         cls,
         operand: jax.Array,
         indices: jax.Array,
-        weights: jax.Array = None,
+        weights: jax.Array | None = None,
         reduce_group_size: int = 1,
-        **kwargs,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply Stream Gather Reduce kernel for sparse embeddings / reductions."""
         from taktiny.kernels.gather_reduce_sc import sc_gather_reduce
@@ -81,7 +85,7 @@ class Embedding(Module):
         operand: jax.Array,
         offsets: jax.Array,
         lengths: jax.Array,
-        **kwargs,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply Ragged Gather kernel."""
         from taktiny.kernels.ragged.ragged_gather import ragged_gather
@@ -93,7 +97,7 @@ class Embedding(Module):
         operand: jax.Array,
         indices: jax.Array,
         kernel: str = "gather_reduce",
-        **kwargs,
+        **kwargs: Any,
     ) -> jax.Array:
         """Unified entry point for Embedding sparse gather kernels."""
         if kernel in ("gather_reduce", "sc_gather_reduce"):
@@ -103,27 +107,27 @@ class Embedding(Module):
         else:
             return operand[indices]
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         return f"{self.num_embeddings} → {self.embedding_dim}"
 
 class SinusoidalPositionalEmbedding(Module):
-    def __init__(self, embedding_dim: int):
+    def __init__(self, embedding_dim: int) -> None:
         self.embedding_dim = embedding_dim
-        
+
     def __call__(self, timesteps: jax.Array) -> jax.Array:
         is_scalar = timesteps.ndim == 0
         if is_scalar:
             timesteps = jnp.expand_dims(timesteps, 0)
-            
+
         half_dim = self.embedding_dim // 2
         emb = math.log(10000) / (half_dim - 1)
         emb = jnp.exp(jnp.arange(half_dim, dtype=jnp.float32) * -emb)
         # timesteps shape is (B,) or (1,) if it was scalar
         emb = timesteps[:, None] * emb[None, :]
         emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
-        
+
         # If embedding_dim is odd, pad by zero
         if self.embedding_dim % 2 == 1:
             emb = jnp.pad(emb, ((0, 0), (0, 1)))
-            
+
         return jnp.squeeze(emb, 0) if is_scalar else emb

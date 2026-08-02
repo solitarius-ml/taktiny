@@ -14,6 +14,8 @@
 # limitations under the License.
 
 """Ragged gather reduce kernel implementation from tpu-inference."""
+from __future__ import annotations
+
 # pylint: disable=line-too-long
 # Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/sparse_core/ragged_gather_reduce_v2.py
 
@@ -144,7 +146,7 @@ class _Scratch:
   def __len__(self) -> int:
     return len(dataclasses.fields(self))
 
-  def __getitem__(self, index: Any):
+  def __getitem__(self, index: Any) -> Any:
     return getattr(self, dataclasses.fields(self)[index].name)
 
 
@@ -164,7 +166,7 @@ class _CostModelConstants:
 
 
 # ceil up to the nearest multiple of b.
-def _align_to(a, b):
+def _align_to(a: Any, b: Any) -> Any:
   return pl.cdiv(a, b) * b
 
 
@@ -342,7 +344,7 @@ def main_kernel(
     scratch: _Scratch,
     *,
     cfg: _Config,
-):
+) -> None:
   """Main kernel for ragged gather-reduce."""
   # Step 1: Resolve this core's row/column partition and its column slice.
   num_simd_lanes = cfg.num_simd_lanes
@@ -418,7 +420,7 @@ def main_kernel(
       in_specs=row_pipeline_in_specs,
       out_specs=(),
   )
-  def row_pipeline(*args):
+  def row_pipeline(*args: Any) -> None:
     src_indices_refs = args[:num_row_subchunks]
     topk_weights_refs = args[num_row_subchunks : 2 * num_row_subchunks]
     # pylint: disable=unbalanced-tuple-unpacking
@@ -469,7 +471,7 @@ def main_kernel(
         prev_dst = dst_indices_list[s - 1][num_simd_lanes - 1]
       prev_dst_val_vmem_sc[pl.ds(s * num_simd_lanes, num_simd_lanes)] = jnp.broadcast_to(prev_dst, (num_simd_lanes,))
 
-    def get_dst_idx(global_idx):
+    def get_dst_idx(global_idx: int) -> Any:
       return dst_indices_list[global_idx // num_simd_lanes][global_idx % num_simd_lanes]
 
     # For each source row, find the VMEM row that will hold its group's fully
@@ -533,7 +535,7 @@ def main_kernel(
         ),
         out_specs=(),
     )
-    def col_pipeline(gather_ref, sem_inner):
+    def col_pipeline(gather_ref: Any, sem_inner: Any) -> None:
       s = pl.program_id(0)
       c = pl.program_id(1)
       col_hbm_start = col_start + c * col_chunk_size
@@ -545,7 +547,7 @@ def main_kernel(
       src_idx_slice = src_indices_vmem_sc[row_slice]
       prev_dst_vals_vec = prev_dst_val_vmem_sc[row_slice]
 
-      def col_loop(col_compute_offset):
+      def col_loop(col_compute_offset: Any) -> None:
         col_slice = pl.ds(col_compute_offset, num_simd_lanes)
         # Running sum, seeded by the carry from the previous sub-chunk.
         previous_accumulated_data = scratch.prev_iter_last_row_vmem[c, col_slice]

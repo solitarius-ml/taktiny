@@ -3,7 +3,7 @@ name = "taktiny"
 version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "aqtp>=0.9.0",
     "datasets>=5.0.1",
@@ -27,6 +27,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "dextiny",
     "diffusers>=0.39.0",
     "equinox>=0.13.8",
     "flax>=0.12.7",
@@ -35,3 +36,6 @@ dev = [
     "tiktoken>=0.13.0",
     "torchvision>=0.27.1",
 ]
+
+[tool.uv.sources]
+dextiny = { git = "https://github.com/solitariusai/dextiny" }

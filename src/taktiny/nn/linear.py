@@ -14,8 +14,8 @@
 """Linear modules."""
 
 from __future__ import annotations
+from typing import Any
 
-from typing import TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
@@ -23,10 +23,8 @@ import qwix
 from jax.nn.initializers import lecun_uniform
 
 from taktiny.nn.module import Module, Parameter
+from taktiny.nn.rng import Rngs
 from taktiny.utils.typing import DType, ShardMode
-
-if TYPE_CHECKING:
-    from taktiny.nn import Rngs
 
 
 default_linear_initializer = lecun_uniform()
@@ -42,14 +40,14 @@ class Linear(Module):
         *,
         bias: bool = True,
         dtype: DType | str = jnp.float32,
-        rngs: Rngs = None,
-        seed: Rngs = None,
-        initializer=default_linear_initializer,
-        quant=None,
-        dot_general=None,
+        rngs: Rngs | None = None,
+        seed: Rngs | None = None,
+        initializer: Any=default_linear_initializer,
+        quant: Any=None,
+        dot_general: Any=None,
         axis_names: tuple[str | None, ...] | None = None,
         shard_mode: ShardMode = ShardMode.AUTO,
-    ):
+    ) -> None:
         if isinstance(in_features, int):
             in_features = (in_features,)
         else:
@@ -95,7 +93,11 @@ class Linear(Module):
             if axis_names is not None:
                 self.bias.axis_names = axis_names[-len(out_features):]
 
-    def __call__(self, x: jax.Array, out_sharding=None) -> jax.Array:
+    def __call__(
+        self,
+        x: jax.Array,
+        out_sharding: jax.sharding.Sharding | None = None,
+    ) -> jax.Array:
         in_dims = len(self.in_features)
         x_contracting_dims = tuple(range(x.ndim - in_dims, x.ndim))
         weight_contracting_dims = tuple(range(in_dims))
@@ -120,7 +122,7 @@ class Linear(Module):
 
         return out
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         in_str = 'x'.join(map(str, self.in_features))
         out_str = 'x'.join(map(str, self.out_features))
         quantized = (

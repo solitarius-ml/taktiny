@@ -14,6 +14,10 @@
 # limitations under the License.
 
 """Ragged token sorting operations with custom VJP."""
+from __future__ import annotations
+
+from typing import Any
+
 
 import jax
 import jax.numpy as jnp
@@ -22,21 +26,21 @@ from taktiny.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 
 
 def ring_ragged_sort(
-    hidden_states_local,
-    topk_indices_local,
-    num_experts,
-    topk,
-    ep_name,
-    ep_size,
-    buffer_size=None,
-    enforce_gather_fallback=False,
-    enforce_gather_reduce_fallback=False,
-    gather_flops_override=-1,
-    gather_reduce_flops_override=-1,
-    gather_bytes_accessed_override=-1,
-    gather_reduce_bytes_accessed_override=-1,
-    use_single_sparsecore=False,
-):
+    hidden_states_local: Any,
+    topk_indices_local: Any,
+    num_experts: Any,
+    topk: Any,
+    ep_name: str,
+    ep_size: int,
+    buffer_size: int | None=None,
+    enforce_gather_fallback: bool=False,
+    enforce_gather_reduce_fallback: bool=False,
+    gather_flops_override: Any=-1,
+    gather_reduce_flops_override: Any=-1,
+    gather_bytes_accessed_override: Any=-1,
+    gather_reduce_bytes_accessed_override: Any=-1,
+    use_single_sparsecore: bool=False,
+) -> Any:
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
   Unlike :func:`a2a_ragged_sort`, which operates on a valid prefix within a single shard,
@@ -75,12 +79,12 @@ def ring_ragged_sort(
   """
 
   @jax.custom_vjp
-  def _ring_ragged_sort(hidden_states_local, topk_indices_local):
+  def _ring_ragged_sort(hidden_states_local: Any, topk_indices_local: Any) -> Any:
     """Sort and gather activations to different EP shards."""
     return _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local)[0]
 
   @jax.named_scope("ragged-sort-fwd")
-  def _ring_ragged_sort_fwd(hidden_states_local, topk_indices_local):
+  def _ring_ragged_sort_fwd(hidden_states_local: Any, topk_indices_local: Any) -> tuple[Any, ...]:
     """Sort and gather activations forward pass."""
 
     num_tokens_local = hidden_states_local.shape[0]
@@ -153,7 +157,7 @@ def ring_ragged_sort(
     return out, res
 
   @jax.named_scope("ragged-sort-bwd")
-  def _ring_ragged_sort_bwd(res, g_out):
+  def _ring_ragged_sort_bwd(res: Any, g_out: Any) -> tuple[Any, ...]:
     """Backward pass for the gather: a Pallas SC ragged gather reduce.
     The forward gathers ``hidden_states_local[token_indices_sorted[i]]`` into
     ``x[i]`` for ``i`` in ``[shard_output_start, shard_output_end)``.  The
@@ -228,21 +232,21 @@ def ring_ragged_sort(
 
 
 def ring_ragged_unsort(
-    sorted_tokens_local,
-    group_sizes_local,
-    topk_argsort_revert_indices,
-    topk,
-    local_num_experts,
-    ep_name,
-    topk_weights,
-    enforce_gather_fallback=False,
-    enforce_gather_reduce_fallback=False,
-    gather_flops_override=-1,
-    gather_reduce_flops_override=-1,
-    gather_bytes_accessed_override=-1,
-    gather_reduce_bytes_accessed_override=-1,
-    use_single_sparsecore=False,
-):
+    sorted_tokens_local: Any,
+    group_sizes_local: Any,
+    topk_argsort_revert_indices: Any,
+    topk: Any,
+    local_num_experts: Any,
+    ep_name: str,
+    topk_weights: Any,
+    enforce_gather_fallback: bool=False,
+    enforce_gather_reduce_fallback: bool=False,
+    gather_flops_override: Any=-1,
+    gather_reduce_flops_override: Any=-1,
+    gather_bytes_accessed_override: Any=-1,
+    gather_reduce_bytes_accessed_override: Any=-1,
+    use_single_sparsecore: bool=False,
+) -> Any:
   """Dual of :func:`ring_ragged_sort`.
 
   Forward:
@@ -274,11 +278,11 @@ def ring_ragged_unsort(
 
   @jax.custom_vjp
   def _ring_ragged_unsort(
-      sorted_tokens_local,
-      group_sizes_local,
-      topk_argsort_revert_indices,
-      topk_weights_flat,
-  ):
+      sorted_tokens_local: Any,
+      group_sizes_local: Any,
+      topk_argsort_revert_indices: Any,
+      topk_weights_flat: Any,
+  ) -> Any:
     """Unsort and scatter activations."""
     return _ring_ragged_unsort_fwd(
         sorted_tokens_local,
@@ -289,11 +293,11 @@ def ring_ragged_unsort(
 
   @jax.named_scope("ragged-unsort-fwd")
   def _ring_ragged_unsort_fwd(
-      sorted_tokens_local,
-      group_sizes_local,
-      topk_argsort_revert_indices,
-      topk_weights_flat,
-  ):
+      sorted_tokens_local: Any,
+      group_sizes_local: Any,
+      topk_argsort_revert_indices: Any,
+      topk_weights_flat: Any,
+  ) -> tuple[Any, ...]:
     """Executes unsorting sending tokens back."""
     group_offsets = jnp.cumulative_sum(group_sizes_local, include_initial=True)
 
@@ -362,7 +366,7 @@ def ring_ragged_unsort(
     return out, res
 
   @jax.named_scope("ragged-unsort-bwd")
-  def _ring_ragged_unsort_bwd(res, g_out):
+  def _ring_ragged_unsort_bwd(res: Any, g_out: Any) -> tuple[Any, ...]:
     """Backward pass for the scatter with routing weights.
 
     The forward computes (per output token t, with topk slots k=0..topk-1):
@@ -453,13 +457,13 @@ def ring_ragged_unsort(
 
 
 def a2a_ragged_sort(
-    inputs,
-    sort_indices,
-    valid_end,
-    enforce_gather_fallback=False,
-    enforce_gather_reduce_fallback=False,
-    use_single_sparsecore=False,
-):
+    inputs: Any,
+    sort_indices: Any,
+    valid_end: Any,
+    enforce_gather_fallback: bool=False,
+    enforce_gather_reduce_fallback: bool=False,
+    use_single_sparsecore: bool=False,
+) -> Any:
   """Ragged-gather variant for ``local_permute``.
 
   Unlike :func:`ring_ragged_sort`, the rows valid for this shard live in
@@ -492,11 +496,11 @@ def a2a_ragged_sort(
   """
 
   @jax.custom_vjp
-  def _a2a_ragged_sort(inputs, sort_indices, valid_end):
+  def _a2a_ragged_sort(inputs: Any, sort_indices: Any, valid_end: Any) -> Any:
     return _a2a_ragged_sort_fwd(inputs, sort_indices, valid_end)[0]
 
   @jax.named_scope("local-ragged-sort-fwd")
-  def _a2a_ragged_sort_fwd(inputs, sort_indices, valid_end):
+  def _a2a_ragged_sort_fwd(inputs: Any, sort_indices: Any, valid_end: Any) -> tuple[Any, ...]:
     start = jnp.int32(0)
     end = valid_end.astype(jnp.int32) if hasattr(valid_end, "astype") else jnp.int32(valid_end)
     out = ragged_gather(
@@ -513,7 +517,7 @@ def a2a_ragged_sort(
     return out, res
 
   @jax.named_scope("local-ragged-sort-bwd")
-  def _a2a_ragged_sort_bwd(res, g_out):
+  def _a2a_ragged_sort_bwd(res: Any, g_out: Any) -> tuple[Any, ...]:
     sort_indices, end, _ = res
     n = sort_indices.shape[0]
     valid_rows_mask = jnp.arange(n) < end
@@ -540,13 +544,13 @@ def a2a_ragged_sort(
 
 
 def a2a_ragged_unsort(
-    sorted_tokens,
-    revert_indices,
-    valid_end,
-    enforce_gather_fallback=False,
-    enforce_gather_reduce_fallback=False,
-    use_single_sparsecore=False,
-):
+    sorted_tokens: Any,
+    revert_indices: Any,
+    valid_end: Any,
+    enforce_gather_fallback: bool=False,
+    enforce_gather_reduce_fallback: bool=False,
+    use_single_sparsecore: bool=False,
+) -> Any:
   """Dual of :func:`a2a_ragged_sort`.
 
   Forward:
@@ -572,11 +576,11 @@ def a2a_ragged_unsort(
   """
 
   @jax.custom_vjp
-  def _a2a_ragged_unsort(sorted_tokens, revert_indices, valid_end):
+  def _a2a_ragged_unsort(sorted_tokens: Any, revert_indices: Any, valid_end: Any) -> Any:
     return _a2a_ragged_unsort_fwd(sorted_tokens, revert_indices, valid_end)[0]
 
   @jax.named_scope("local-ragged-unsort-fwd")
-  def _a2a_ragged_unsort_fwd(sorted_tokens, revert_indices, valid_end):
+  def _a2a_ragged_unsort_fwd(sorted_tokens: Any, revert_indices: Any, valid_end: Any) -> tuple[Any, ...]:
     start = jnp.int32(0)
     end = valid_end.astype(jnp.int32) if hasattr(valid_end, "astype") else jnp.int32(valid_end)
     n = revert_indices.shape[0]
@@ -594,7 +598,7 @@ def a2a_ragged_unsort(
     return out, res
 
   @jax.named_scope("local-ragged-unsort-bwd")
-  def _a2a_ragged_unsort_bwd(res, g_out):
+  def _a2a_ragged_unsort_bwd(res: Any, g_out: Any) -> tuple[Any, ...]:
     revert_indices, end, sorted_tokens_shape, start = res
     # g_sorted_tokens[revert_indices[i]] = g_out[i] for i in [0, end).
     # Because revert_indices is a permutation, build the inverse and use

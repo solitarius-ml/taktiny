@@ -15,11 +15,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 import pickle
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from taktiny.trainer.config import DatasetConfig, TrainingConfig
 from taktiny.trainer.trainer import Trainer
+from taktiny.utils.typing import ArrayLike, Batch, LossFn, PyTree
 
 
 @runtime_checkable
@@ -32,14 +35,14 @@ class PolicyRuntime(Protocol):
     def policy_version(self) -> int:
         """Return the version currently served by the runtime."""
 
-    def generate(self, *args, **kwargs):
+    def generate(self, *args: Any, **kwargs: Any) -> Any:
         """Generate samples with the currently synchronized policy."""
 
     def sync(
         self,
         *,
         policy_version: int | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> int:
         """Publish model weights and return the served policy version."""
 
@@ -54,14 +57,14 @@ class Rollout:
     ``metadata`` or in a more specialized rollout type.
     """
 
-    prompt_ids: Any
-    output_ids: Any
+    prompt_ids: ArrayLike
+    output_ids: ArrayLike
     policy_version: int
-    logprobs: Any = None
+    logprobs: ArrayLike | None = None
     finish_reason: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if (
             isinstance(self.policy_version, bool)
             or not isinstance(self.policy_version, int)
@@ -79,7 +82,9 @@ class Rollout:
             raise TypeError('metadata must be a mapping')
 
 
-def _runtime_methods(runtime):
+def _runtime_methods(
+    runtime: Any,
+) -> tuple[Any, Callable[..., Any] | None, Callable[..., Any] | None]:
     return (
         getattr(runtime, 'model', None),
         getattr(runtime, 'generate', None),
@@ -87,7 +92,7 @@ def _runtime_methods(runtime):
     )
 
 
-def _is_policy_runtime(runtime):
+def _is_policy_runtime(runtime: Any) -> bool:
     model, generate, sync = _runtime_methods(runtime)
     return (
         model is not None
@@ -96,7 +101,11 @@ def _is_policy_runtime(runtime):
     )
 
 
-def _validate_policy_version(value, *, name='policy_version'):
+def _validate_policy_version(
+    value: Any,
+    *,
+    name: str = 'policy_version',
+) -> int:
     if (
         isinstance(value, bool)
         or not isinstance(value, int)
@@ -109,40 +118,48 @@ def _validate_policy_version(value, *, name='policy_version'):
 class _RolloutDataLoader:
     """Lazily turn prompt batches into optimizer-ready RL batches."""
 
-    def __init__(self, trainer, source):
+    def __init__(
+        self,
+        trainer: RLBaseTrainer,
+        source: Iterable[Batch],
+    ) -> None:
         self.trainer = trainer
         self.source = source
 
-    def __iter__(self):
+    def __iter__(self) -> _RolloutIterator:
         return _RolloutIterator(self.trainer, iter(self.source))
 
-    def __len__(self):
+    def __len__(self) -> int:
         try:
             return len(self.source)
         except (AttributeError, TypeError) as error:
             raise TypeError('rollout source has no length') from error
 
-    def set_epoch(self, epoch):
+    def set_epoch(self, epoch: int) -> bool:
         return self.trainer._set_dataloader_epoch(self.source, epoch)
 
 
 class _RolloutIterator:
     """Stateful iterator that prevents rollouts from being prefetched."""
 
-    def __init__(self, trainer, source):
+    def __init__(
+        self,
+        trainer: RLBaseTrainer,
+        source: Iterator[Batch],
+    ) -> None:
         self.trainer = trainer
         self.source = source
         self.position = 0
 
-    def __iter__(self):
+    def __iter__(self) -> _RolloutIterator:
         return self
 
-    def __next__(self):
+    def __next__(self) -> Batch:
         prompt_batch = next(self.source)
         self.position += 1
         return self.trainer._prepare_rollout_batch(prompt_batch)
 
-    def get_state(self):
+    def get_state(self) -> bytes:
         get_state = getattr(self.source, 'get_state', None)
         source_state = get_state() if callable(get_state) else None
         return pickle.dumps({
@@ -150,7 +167,7 @@ class _RolloutIterator:
             'source_state': source_state,
         })
 
-    def set_state(self, state):
+    def set_state(self, state: bytes) -> None:
         try:
             state = pickle.loads(state)
         except Exception as error:
@@ -176,7 +193,7 @@ class _RolloutIterator:
                 next(self.source)
         self.position = position
 
-    def close(self):
+    def close(self) -> None:
         close = getattr(self.source, 'close', None)
         if callable(close):
             close()
@@ -209,15 +226,15 @@ class RLBaseTrainer(Trainer):
 
     def __init__(
         self,
-        model,
-        training_config,
-        dataset_config,
+        model: Any,
+        training_config: TrainingConfig,
+        dataset_config: DatasetConfig,
         *,
-        loss_fn,
+        loss_fn: LossFn,
         runtime: PolicyRuntime | None = None,
-        callbacks=None,
-        compute_metrics=None,
-    ):
+        callbacks: Iterable[Any] | None = None,
+        compute_metrics: Callable[..., Mapping[str, Any]] | None = None,
+    ) -> None:
         inferred_runtime = model if _is_policy_runtime(model) else None
         if runtime is not None and not _is_policy_runtime(runtime):
             raise TypeError(
@@ -275,33 +292,33 @@ class RLBaseTrainer(Trainer):
             self._prompt_dataloader = None
 
     @property
-    def has_runtime(self):
+    def has_runtime(self) -> bool:
         """Whether online generation is backed by a policy runtime."""
         return self.runtime is not None
 
     @property
-    def policy_dirty(self):
+    def policy_dirty(self) -> bool:
         """Whether model updates have not yet been published to the runtime."""
         return self._policy_dirty
 
-    def _require_runtime(self):
+    def _require_runtime(self) -> PolicyRuntime:
         if self.runtime is None:
             raise RuntimeError(
                 'A policy runtime is required for online rollout generation'
             )
         return self.runtime
 
-    def _after_optimizer_step(self, params, logs):
+    def _after_optimizer_step(self, params: Any, logs: Any) -> None:
         del logs
         self._inject_params(params)
         self.mark_policy_updated()
 
-    def mark_policy_updated(self):
+    def mark_policy_updated(self) -> None:
         """Mark the in-memory policy as newer than the inference runtime."""
         if self.runtime is not None:
             self._policy_dirty = True
 
-    def sync_policy(self, *, force=False, **kwargs):
+    def sync_policy(self, *, force: bool = False, **kwargs: Any) -> int:
         """Synchronize a dirty policy and return its served version.
 
         ``force=True`` publishes a new version even when no optimizer update
@@ -337,8 +354,8 @@ class RLBaseTrainer(Trainer):
 
     def generate_rollouts(
         self,
-        prompt_batch,
-    ):
+        prompt_batch: Any,
+    ) -> Any:
         """Generate backend output for one prompt batch.
 
         Concrete algorithms may override this hook to select prompt fields,
@@ -348,7 +365,11 @@ class RLBaseTrainer(Trainer):
         runtime = self._require_runtime()
         return runtime.generate(prompt_batch)
 
-    def build_rollouts(self, prompt_batch, generated):
+    def build_rollouts(
+        self,
+        prompt_batch: Batch,
+        generated: Any,
+    ) -> Rollout | Iterable[Rollout]:
         """Convert runtime output into one or more :class:`Rollout` objects."""
         raise NotImplementedError(
             'RLBaseTrainer subclasses must implement build_rollouts'
@@ -357,12 +378,12 @@ class RLBaseTrainer(Trainer):
     def create_rollout(
         self,
         *,
-        prompt_ids,
-        output_ids,
-        logprobs=None,
-        finish_reason=None,
-        metadata=None,
-    ):
+        prompt_ids: ArrayLike,
+        output_ids: ArrayLike,
+        logprobs: ArrayLike | None = None,
+        finish_reason: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> Rollout:
         """Create a rollout stamped with the currently served policy."""
         self._require_runtime()
         if self._policy_dirty:
@@ -378,7 +399,10 @@ class RLBaseTrainer(Trainer):
             metadata={} if metadata is None else metadata,
         )
 
-    def validate_rollouts(self, rollouts):
+    def validate_rollouts(
+        self,
+        rollouts: Rollout | Iterable[Rollout],
+    ) -> tuple[Rollout, ...]:
         """Reject rollout records produced by another policy version."""
         if isinstance(rollouts, Rollout):
             rollouts = (rollouts,)
@@ -402,19 +426,23 @@ class RLBaseTrainer(Trainer):
                 )
         return rollouts
 
-    def compute_rewards(self, rollouts):
+    def compute_rewards(self, rollouts: tuple[Rollout, ...]) -> PyTree:
         """Compute algorithm-specific rewards for rollout records."""
         raise NotImplementedError(
             'RLBaseTrainer subclasses must implement compute_rewards'
         )
 
-    def prepare_training_batch(self, rollouts, rewards):
+    def prepare_training_batch(
+        self,
+        rollouts: tuple[Rollout, ...],
+        rewards: PyTree,
+    ) -> Batch:
         """Build the batch consumed by ``loss_fn`` from rewarded rollouts."""
         raise NotImplementedError(
             'RLBaseTrainer subclasses must implement prepare_training_batch'
         )
 
-    def _prepare_rollout_batch(self, prompt_batch):
+    def _prepare_rollout_batch(self, prompt_batch: Batch) -> Batch:
         self.sync_policy()
         generated = self.generate_rollouts(prompt_batch)
         rollouts = self.build_rollouts(prompt_batch, generated)
@@ -422,11 +450,17 @@ class RLBaseTrainer(Trainer):
         rewards = self.compute_rewards(rollouts)
         return self.prepare_training_batch(rollouts, rewards)
 
-    def _before_train_end(self):
+    def _before_train_end(self) -> None:
         if self.runtime is not None and self._policy_dirty:
             self.sync_policy()
 
-    def _trainer_state(self, *, step, epoch, step_in_epoch):
+    def _trainer_state(
+        self,
+        *,
+        step: int,
+        epoch: int,
+        step_in_epoch: int,
+    ) -> dict[str, Any]:
         state = super()._trainer_state(
             step=step,
             epoch=epoch,
@@ -435,7 +469,7 @@ class RLBaseTrainer(Trainer):
         state['policy_version'] = self.policy_version
         return state
 
-    def _load_resume_state(self, checkpoint_path):
+    def _load_resume_state(self, checkpoint_path: str) -> dict[str, Any]:
         state = super()._load_resume_state(checkpoint_path)
         self.policy_version = _validate_policy_version(
             state.get('policy_version', 0),

@@ -13,16 +13,22 @@
 # limitations under the License.
 """Base module class"""
 
+from __future__ import annotations
+
 import jax
 import operator
 import qwix
+from collections.abc import Iterator, Mapping, Sequence
 from jax.tree_util import register_pytree_node_class
+from typing import Any, Self
 
-def _format_scaled(value, scale, suffix):
+from taktiny.utils.typing import ParameterDict, PyTree, StateDict
+
+def _format_scaled(value: int | float, scale: int, suffix: str) -> str:
     number = f"{value / scale:.2f}".rstrip('0').rstrip('.')
     return f"{number}{suffix}"
 
-def format_params(size):
+def format_params(size: int) -> str:
     for scale, suffix in (
         (1_000_000_000_000, 'T'),
         (1_000_000_000, 'B'),
@@ -33,7 +39,7 @@ def format_params(size):
             return _format_scaled(size, scale, suffix)
     return f"{size:,}"
 
-def format_bytes(size):
+def format_bytes(size: int) -> str:
     for scale, suffix in (
         (1024**4, 'TB'),
         (1024**3, 'GB'),
@@ -45,7 +51,7 @@ def format_bytes(size):
             return f"{number} {suffix}"
     return f"{int(size)} B"
 
-def format_dtype(dtype):
+def format_dtype(dtype: Any) -> str:
     name = dtype.name
     if name == 'float32': return 'f32'
     if name == 'float16': return 'f16'
@@ -54,7 +60,7 @@ def format_dtype(dtype):
     if name == 'int64': return 'i64'
     return name
 
-def iter_children(obj):
+def iter_children(obj: object) -> Iterator[tuple[str, Module | Parameter]]:
     if not hasattr(obj, '__dict__'): return
     for k, v in obj.__dict__.items():
         if isinstance(v, (Module, Parameter)):
@@ -64,14 +70,20 @@ def iter_children(obj):
                 name = str(i) if k == 'layers' else f"{k}.{i}"
                 yield name, x
 
-def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
+def build_tree_repr(
+    name: str,
+    obj: object,
+    prefix: str = "",
+    is_last: bool = True,
+    is_root: bool = False,
+) -> tuple[list[str], int, int]:
     lines = []
     total_params = 0
     total_bytes = 0
-    
+
     current_prefix = "" if is_root else prefix + ("└── " if is_last else "├── ")
     child_prefix = "" if is_root else prefix + ("    " if is_last else "│   ")
-    
+
     if isinstance(obj, Parameter):
         if isinstance(obj.value, qwix.QArray):
             p = obj.value.qvalue.size
@@ -87,10 +99,10 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
         sh = ", ".join(map(str, obj.value.shape))
         lines.append(f"{current_prefix}{name}: {dt}[{sh}]")
         return lines, p, b
-        
+
     elif isinstance(obj, Module):
         children_items = list(iter_children(obj))
-                        
+
         child_lines = []
         for i, (c_name, c_obj) in enumerate(children_items):
             c_is_last = (i == len(children_items) - 1)
@@ -98,10 +110,10 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
             child_lines.extend(c_lines)
             total_params += c_p
             total_bytes += c_b
-            
+
         extra = obj.extra_repr()
         title = f"{obj.__class__.__name__}({extra})" if extra else obj.__class__.__name__
-        
+
         if is_root:
             node_str = f"{title} ({format_params(total_params)} parameters, {format_bytes(total_bytes)})"
         else:
@@ -110,14 +122,14 @@ def build_tree_repr(name, obj, prefix="", is_last=True, is_root=False):
                 f"({format_params(total_params)} parameters, "
                 f"{format_bytes(total_bytes)})"
             )
-            
+
         lines.insert(0, node_str)
         lines.extend(child_lines)
         return lines, total_params, total_bytes
-        
+
     return [], 0, 0
 
-def _is_dynamic(v):
+def _is_dynamic(v: object) -> bool:
     if isinstance(v, (Module, Parameter, jax.Array)):
         return True
     if hasattr(jax.numpy, 'ndarray') and isinstance(v, jax.numpy.ndarray):
@@ -129,41 +141,47 @@ def _is_dynamic(v):
     return False
 
 class Module:
-    def __init_subclass__(cls, **kwargs):
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         register_pytree_node_class(cls)
 
-    def extra_repr(self): return ""
-    def __repr__(self):
+    def extra_repr(self) -> str: return ""
+    def __repr__(self) -> str:
         lines, _, _ = build_tree_repr("", self, is_root=True)
         return "\n".join(lines)
 
-    def tree_flatten(self):
+    def tree_flatten(
+        self,
+    ) -> tuple[tuple[PyTree, ...], tuple[tuple[str, ...], dict[str, Any]]]:
         dynamic_names = []
         dynamic_vals = []
         static_data = {}
-        
+
         for k, v in self.__dict__.items():
             if _is_dynamic(v):
                 dynamic_names.append(k)
                 dynamic_vals.append(v)
             else:
                 static_data[k] = v
-                
+
         return tuple(dynamic_vals), (tuple(dynamic_names), static_data)
 
     @classmethod
-    def tree_unflatten(cls, aux_data, children):
+    def tree_unflatten(
+        cls,
+        aux_data: tuple[Sequence[str], Mapping[str, Any]],
+        children: Sequence[PyTree],
+    ) -> Self:
         obj = object.__new__(cls)
         dynamic_names, static_data = aux_data
-        
+
         obj.__dict__.update(static_data)
         for k, v in zip(dynamic_names, children):
             obj.__dict__[k] = v
-            
+
         return obj
 
-    def flat_state_dict(self, prefix=''):
+    def flat_state_dict(self, prefix: str = '') -> StateDict:
         state = {}
         for name, child in iter_children(self):
             if isinstance(child, Parameter):
@@ -171,8 +189,8 @@ class Module:
             elif isinstance(child, Module):
                 state.update(child.flat_state_dict(prefix + name + '.'))
         return state
-        
-    def flat_parameter_dict(self, prefix=''):
+
+    def flat_parameter_dict(self, prefix: str = '') -> ParameterDict:
         state = {}
         for name, child in iter_children(self):
             if isinstance(child, Parameter):
@@ -181,7 +199,7 @@ class Module:
                 state.update(child.flat_parameter_dict(prefix + name + '.'))
         return state
 
-    def state_dict(self):
+    def state_dict(self) -> StateDict:
         state = {}
         for name, child in iter_children(self):
             if isinstance(child, Parameter):
@@ -190,7 +208,11 @@ class Module:
                 state[name] = child.state_dict()
         return state
 
-    def load_flat_state_dict(self, state, prefix=''):
+    def load_flat_state_dict(
+        self,
+        state: Mapping[str, PyTree],
+        prefix: str = '',
+    ) -> None:
         for name, child in iter_children(self):
             if isinstance(child, Parameter):
                 full_name = prefix + name
@@ -199,7 +221,7 @@ class Module:
             elif isinstance(child, Module):
                 child.load_flat_state_dict(state, prefix + name + '.')
 
-    def load_state_dict(self, state):
+    def load_state_dict(self, state: Mapping[str, PyTree]) -> None:
         for name, child in iter_children(self):
             if isinstance(child, Parameter):
                 if name in state:
@@ -209,11 +231,11 @@ class Module:
                     child.load_state_dict(state[name])
 
 class Parameter(Module):
-    def __init__(self, array: jax.Array, *, trainable: bool = True):
+    def __init__(self, array: PyTree, *, trainable: bool = True) -> None:
         self.value = array
         self.trainable = trainable
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             "Parameter("
             f"shape={getattr(self.value, 'shape', 'None')}, "
@@ -222,20 +244,24 @@ class Parameter(Module):
             ")"
         )
 
-    def __jax_array__(self):
+    def __jax_array__(self) -> jax.Array:
         if isinstance(self.value, qwix.QArray):
             return qwix.dequantize(self.value)
         return self.value
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self.value, name)
-        
-    def tree_flatten(self):
+
+    def tree_flatten(self) -> tuple[tuple[PyTree], dict[str, Any]]:
         aux = {k: v for k, v in self.__dict__.items() if k != 'value'}
         return (self.value,), aux
-        
+
     @classmethod
-    def tree_unflatten(cls, aux_data, children):
+    def tree_unflatten(
+        cls,
+        aux_data: Mapping[str, Any],
+        children: Sequence[PyTree],
+    ) -> Self:
         obj = object.__new__(cls)
         obj.value = children[0]
         if aux_data:
@@ -243,8 +269,8 @@ class Parameter(Module):
                 setattr(obj, k, v)
         return obj
 
-def _make_magic_methods():
-    for op in ['add', 'sub', 'mul', 'truediv', 'floordiv', 'mod', 'pow', 'matmul', 
+def _make_magic_methods() -> None:
+    for op in ['add', 'sub', 'mul', 'truediv', 'floordiv', 'mod', 'pow', 'matmul',
                'eq', 'ne', 'lt', 'le', 'gt', 'ge']:
         magic = f'__{op}__'
         rmagic = f'__r{op}__'
@@ -253,7 +279,7 @@ def _make_magic_methods():
     for op in ['neg', 'pos', 'abs', 'invert']:
         magic = f'__{op}__'
         setattr(Parameter, magic, lambda self, o=op: getattr(operator, o)(self.value))
-    
+
     setattr(Parameter, '__getitem__', lambda self, key: operator.getitem(self.value, key))
 
 _make_magic_methods()

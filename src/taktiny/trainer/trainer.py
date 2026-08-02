@@ -13,8 +13,7 @@
 # limitations under the License.
 
 from __future__ import annotations
-
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -26,6 +25,7 @@ import os
 import re
 import shutil
 import uuid
+from typing import Any, TypeVar
 
 import jax
 import numpy as np
@@ -33,24 +33,27 @@ import qwix
 from taktiny.trainer.config import TrainingConfig, DatasetConfig
 from taktiny.nn import Rngs
 from taktiny.nn.module import Module, Parameter
+from taktiny.utils.typing import Batch, LossFn, PathLike, PyTree
 
 import jax.numpy as jnp
 import optax
 
-def _is_trainable_value(value):
+T = TypeVar('T')
+
+def _is_trainable_value(value: Any) -> bool:
     if isinstance(value, qwix.QArray):
         return False
-    
+
     if not hasattr(value, 'dtype'):
         return False
-    
+
     if not jnp.issubdtype(value.dtype, jnp.inexact):
         return False
-    
+
     return value.dtype != getattr(jnp, 'float8_e4m3fn', None)
 
 
-def _parameter_labels(params):
+def _parameter_labels(params: PyTree) -> PyTree:
     """Build Optax labels from explicit Taktiny parameter metadata."""
     if not isinstance(params, Module):
         return jax.tree.map(
@@ -62,7 +65,7 @@ def _parameter_labels(params):
             params,
         )
 
-    def label_parameter(parameter):
+    def label_parameter(parameter: Parameter) -> PyTree:
         trainable = (
             getattr(parameter, 'trainable', True)
             and _is_trainable_value(parameter.value)
@@ -77,7 +80,7 @@ def _parameter_labels(params):
     )
 
 
-def _partition_params(params, labels):
+def _partition_params(params: PyTree, labels: PyTree) -> tuple[PyTree, PyTree]:
     trainable = jax.tree.map(
         lambda value, label: (
             value if label == 'trainable' else None
@@ -95,7 +98,7 @@ def _partition_params(params, labels):
     return trainable, frozen
 
 
-def _combine_params(trainable, frozen):
+def _combine_params(trainable: PyTree, frozen: PyTree) -> PyTree:
     return jax.tree.map(
         lambda trainable_value, frozen_value: (
             frozen_value
@@ -108,7 +111,7 @@ def _combine_params(trainable, frozen):
     )
 
 
-def _tree_shardings(tree):
+def _tree_shardings(tree: PyTree) -> PyTree:
     return jax.tree.map(
         lambda value: (
             value.sharding if isinstance(value, jax.Array) else None
@@ -117,7 +120,7 @@ def _tree_shardings(tree):
     )
 
 
-def _parameter_mesh(params):
+def _parameter_mesh(params: PyTree) -> jax.sharding.Mesh | None:
     for value in jax.tree.leaves(params):
         sharding = getattr(value, 'sharding', None)
         if isinstance(sharding, jax.sharding.NamedSharding):
@@ -125,14 +128,14 @@ def _parameter_mesh(params):
     return None
 
 
-def _sharding_mesh(sharding):
+def _sharding_mesh(sharding: PyTree) -> jax.sharding.Mesh | None:
     for value in jax.tree.leaves(sharding):
         if isinstance(value, jax.sharding.NamedSharding):
             return value.mesh
     return None
 
 
-def _uses_multiple_devices(tree):
+def _uses_multiple_devices(tree: PyTree) -> bool:
     for value in jax.tree.leaves(tree):
         sharding = getattr(value, 'sharding', None)
         if sharding is not None and len(sharding.device_set) > 1:
@@ -140,7 +143,10 @@ def _uses_multiple_devices(tree):
     return False
 
 
-def _validate_parameter_placement(params, batch_mesh):
+def _validate_parameter_placement(
+    params: PyTree,
+    batch_mesh: jax.sharding.Mesh | None,
+) -> None:
     parameter_mesh = _parameter_mesh(params)
     if (
         parameter_mesh is not None
@@ -161,7 +167,10 @@ def _validate_parameter_placement(params, batch_mesh):
     )
 
 
-def _place_trainable_params(tree, mesh):
+def _place_trainable_params(
+    tree: PyTree,
+    mesh: jax.sharding.Mesh | None,
+) -> PyTree:
     if mesh is None:
         return tree
 
@@ -170,7 +179,7 @@ def _place_trainable_params(tree, mesh):
         jax.sharding.PartitionSpec(),
     )
 
-    def place(value):
+    def place(value: Any) -> Any:
         if not isinstance(value, jax.Array):
             return value
         if isinstance(value.sharding, jax.sharding.NamedSharding):
@@ -180,7 +189,10 @@ def _place_trainable_params(tree, mesh):
     return jax.tree.map(place, tree)
 
 
-def _place_optimizer_state(tree, mesh):
+def _place_optimizer_state(
+    tree: PyTree,
+    mesh: jax.sharding.Mesh | None,
+) -> PyTree:
     if mesh is None or mesh.size <= 1:
         return tree
 
@@ -189,7 +201,7 @@ def _place_optimizer_state(tree, mesh):
         jax.sharding.PartitionSpec(),
     )
 
-    def place(value):
+    def place(value: Any) -> Any:
         if not isinstance(value, jax.Array):
             return value
         if isinstance(value.sharding, jax.sharding.NamedSharding):
@@ -205,7 +217,11 @@ def _place_optimizer_state(tree, mesh):
     return jax.tree.map(place, tree)
 
 
-def _prefetch(iterable, place, size):
+def _prefetch(
+    iterable: Iterable[T],
+    place: Callable[[T], T],
+    size: int,
+) -> Iterator[T]:
     """Place a bounded number of batches ahead of consumption."""
     iterator = iter(iterable)
     if size == 0:
@@ -228,20 +244,26 @@ def _prefetch(iterable, place, size):
             pass
 
 
-def _format_iteration_time(seconds):
+def _format_iteration_time(seconds: float) -> str:
     if seconds < 1:
         return f'{seconds * 1000:.1f} ms/it'
-    
+
     if seconds < 60:
         return f'{seconds:.1f} s/it'
-    
+
     return f'{seconds / 60:.1f} min/it'
 
 
 class _GrainEpochLoader:
     """Build one resumable Grain loader for the selected epoch."""
 
-    def __init__(self, source, *, shuffle, seed):
+    def __init__(
+        self,
+        source: Sequence[Any],
+        *,
+        shuffle: bool,
+        seed: int,
+    ) -> None:
         if not (
             callable(getattr(source, '__len__', None))
             and callable(getattr(source, '__getitem__', None))
@@ -255,7 +277,7 @@ class _GrainEpochLoader:
         self.seed = seed
         self.epoch = 0
 
-    def __len__(self):
+    def __len__(self) -> int:
         size = len(self.source)
         process_count = jax.process_count()
         process_index = jax.process_index()
@@ -264,10 +286,10 @@ class _GrainEpochLoader:
             (size + process_count - 1 - process_index) // process_count,
         )
 
-    def set_epoch(self, epoch):
+    def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Any]:
         import grain
 
         dataloader = grain.load(
@@ -280,7 +302,7 @@ class _GrainEpochLoader:
         return iter(dataloader)
 
 
-def _split_loaded_dataset(dataset):
+def _split_loaded_dataset(dataset: Any) -> tuple[Any, Any | None]:
     if isinstance(dataset, tuple):
         if len(dataset) != 2:
             raise ValueError(
@@ -301,7 +323,7 @@ def _split_loaded_dataset(dataset):
     return dataset, None
 
 
-def _load_dataset_splits(config):
+def _load_dataset_splits(config: DatasetConfig) -> tuple[Any, Any | None]:
     from datasets import load_dataset
 
     token = os.environ.get('HF_TOKEN') or config.hf_token
@@ -320,7 +342,7 @@ def _load_dataset_splits(config):
     return train, validation
 
 
-def _load_dataset_from_repo(config):
+def _load_dataset_from_repo(config: DatasetConfig) -> tuple[Any, Any | None]:
     train, validation = _load_dataset_splits(config)
 
     if config.streaming:
@@ -343,14 +365,14 @@ def _load_dataset_from_repo(config):
 class Trainer:
     def __init__(
         self,
-        model,
+        model: Any,
         training_config: TrainingConfig,
         dataset_config: DatasetConfig,
         *,
-        loss_fn,
-        callbacks=None,
-        compute_metrics=None,
-    ):
+        loss_fn: LossFn,
+        callbacks: Iterable[Any] | Any | None = None,
+        compute_metrics: Callable[..., Mapping[str, Any]] | None = None,
+    ) -> None:
         self.model = model
         self.loss_fn = loss_fn
         self.training_config = training_config
@@ -361,7 +383,7 @@ class Trainer:
         self.compute_metrics = compute_metrics
         if compute_metrics is not None and not callable(compute_metrics):
             raise TypeError('compute_metrics should be callable')
-        
+
         if callbacks is None:
             self.callbacks = []
 
@@ -404,30 +426,30 @@ class Trainer:
         self._pending_checkpoint = None
 
     @staticmethod
-    def _callable_accepts_rng(function):
+    def _callable_accepts_rng(function: Callable[..., Any]) -> bool:
         try:
             signature = inspect.signature(function)
         except (TypeError, ValueError):
             return False
-        
+
         parameter = signature.parameters.get('rng')
         if parameter is not None:
             return parameter.kind is not inspect.Parameter.POSITIONAL_ONLY
-        
+
         return any(
             value.kind is inspect.Parameter.VAR_KEYWORD
             for value in signature.parameters.values()
         )
 
     @staticmethod
-    def _rng_state_path(checkpoint_path):
+    def _rng_state_path(checkpoint_path: str) -> str:
         if jax.process_count() == 1:
             filename = 'rng_state.json'
         else:
             filename = f'rng_state-{jax.process_index():05d}.json'
         return os.path.join(checkpoint_path, filename)
 
-    def _capture_rng_state(self):
+    def _capture_rng_state(self) -> dict[str, Any]:
         return {
             'impl': str(jax.random.key_impl(self.rngs.key)),
             'key_data': np.asarray(
@@ -435,7 +457,11 @@ class Trainer:
             ).tolist(),
         }
 
-    def _save_rng_state(self, checkpoint_path, state=None):
+    def _save_rng_state(
+        self,
+        checkpoint_path: str,
+        state: Mapping[str, Any] | None = None,
+    ) -> str:
         if state is None:
             state = self._capture_rng_state()
 
@@ -445,11 +471,11 @@ class Trainer:
 
         return state_path
 
-    def _restore_rng_state(self, checkpoint_path):
+    def _restore_rng_state(self, checkpoint_path: str) -> bool:
         state_path = self._rng_state_path(checkpoint_path)
         if not os.path.isfile(state_path):
             return False
-        
+
         with open(state_path) as state_file:
             state = json.load(state_file)
 
@@ -457,7 +483,7 @@ class Trainer:
         key_data = state.get('key_data')
         if not isinstance(impl, str) or not isinstance(key_data, list):
             raise ValueError('Checkpoint RNG state is invalid')
-        
+
         key = jax.random.wrap_key_data(
             jnp.asarray(key_data, dtype=jnp.uint32),
             impl=impl,
@@ -465,30 +491,30 @@ class Trainer:
         self.rngs = Rngs(key)
         return True
 
-    def add_callback(self, callback):
+    def add_callback(self, callback: Any) -> Any:
         """Append a callback and return it."""
         self._validate_callback(callback)
         self.callbacks.append(callback)
         return callback
 
-    def remove_callback(self, callback):
+    def remove_callback(self, callback: Any) -> None:
         """Remove a previously registered callback."""
         self.callbacks.remove(callback)
 
-    def _call_event(self, event, **kwargs):
+    def _call_event(self, event: str, **kwargs: Any) -> None:
         for callback in tuple(self.callbacks):
             method = getattr(callback, event, None)
             if callable(method):
                 method(self, **kwargs)
 
-    def _after_optimizer_step(self, params, logs):
+    def _after_optimizer_step(self, params: Any, logs: Any) -> None:
         """Run subclass bookkeeping after a successful optimizer update."""
 
-    def _before_train_end(self):
+    def _before_train_end(self) -> None:
         """Run subclass finalization before train-end callbacks."""
 
     @staticmethod
-    def _set_dataloader_epoch(dataloader, epoch):
+    def _set_dataloader_epoch(dataloader: Any, epoch: int) -> bool:
         candidates = (
             dataloader,
             getattr(dataloader, 'sampler', None),
@@ -500,18 +526,18 @@ class Trainer:
             if callable(set_epoch):
                 set_epoch(epoch)
                 return True
-            
+
         return False
 
     @staticmethod
-    def _has_iterator_state(iterator):
+    def _has_iterator_state(iterator: Any) -> bool:
         return (
             callable(getattr(iterator, 'get_state', None))
             and callable(getattr(iterator, 'set_state', None))
         )
 
     @staticmethod
-    def _dataloader_state_paths(checkpoint_path):
+    def _dataloader_state_paths(checkpoint_path: str) -> tuple[str, str]:
         suffix = (
             ''
             if jax.process_count() == 1
@@ -529,7 +555,7 @@ class Trainer:
             ),
         )
 
-    def _capture_dataloader_state(self):
+    def _capture_dataloader_state(self) -> tuple[str, Any] | None:
         iterator = self._active_data_iterator
         if iterator is None or not self._has_iterator_state(iterator):
             return None
@@ -537,7 +563,7 @@ class Trainer:
         state = iterator.get_state()
         if isinstance(state, (bytes, bytearray, memoryview)):
             return ('bytes', bytes(state))
-        
+
         try:
             json.dumps(state)
         except (TypeError, ValueError) as error:
@@ -545,10 +571,14 @@ class Trainer:
                 'Dataloader iterator get_state() should return bytes or '
                 'JSON-serializable data'
             ) from error
-        
+
         return ('json', state)
 
-    def _save_dataloader_state(self, checkpoint_path, snapshot=None):
+    def _save_dataloader_state(
+        self,
+        checkpoint_path: str,
+        snapshot: tuple[str, Any] | None = None,
+    ) -> str | None:
         if snapshot is None:
             snapshot = self._capture_dataloader_state()
 
@@ -577,7 +607,7 @@ class Trainer:
 
         return json_path
 
-    def _restore_dataloader_state(self, iterator, checkpoint_path):
+    def _restore_dataloader_state(self, iterator: Any, checkpoint_path: str) -> bool:
         binary_path, json_path = self._dataloader_state_paths(
             checkpoint_path
         )
@@ -589,12 +619,12 @@ class Trainer:
 
         if not existing_paths:
             return False
-        
+
         if len(existing_paths) != 1:
             raise ValueError(
                 'Resume checkpoint contains multiple dataloader states'
             )
-        
+
         if not self._has_iterator_state(iterator):
             return False
 
@@ -611,7 +641,7 @@ class Trainer:
         return True
 
     @staticmethod
-    def _validate_callback(callback):
+    def _validate_callback(callback: Any) -> None:
         events = (
             'on_train_begin',
             'on_step_end',
@@ -629,59 +659,59 @@ class Trainer:
                 'Each callback should implement at least one Trainer event'
             )
 
-    def _initial_loss_scale(self):
+    def _initial_loss_scale(self) -> float:
         loss_scale = self.training_config.loss_scale
         if loss_scale == 'dynamic':
             return float(self.training_config.initial_loss_scale)
-        
+
         if loss_scale is None:
             return 1.0
-        
+
         return float(loss_scale)
-        
-    def _diagnose_model_type(self, model) -> str:
+
+    def _diagnose_model_type(self, model: Any) -> str:
         # Detect Taktiny models
         if isinstance(model, Module):
             return "taktiny"
-            
+
         # Detect Flax NNX models
         if hasattr(model, "__module__") and "flax.nnx" in model.__module__:
             return "nnx"
-            
+
         # Detect classic Flax Linen models
         if hasattr(model, "__module__") and "flax.linen" in model.__module__:
             return "flax_linen"
-            
+
         # Detect Equinox models
         if hasattr(model, "__module__") and "equinox" in model.__module__:
             return "equinox"
-            
+
         return "unknown"
-        
-    def extract_params(self):
+
+    def extract_params(self) -> PyTree:
         """Extract params based on the diagnosed model type."""
         if self.model_type == "taktiny":
             # Taktiny models are fully registered PyTrees
             return self.model
-        
+
         elif self.model_type == "nnx":
             from flax import nnx
             _, params = nnx.split(self.model)
             return params
-        
+
         elif self.model_type == "flax_linen":
             # Assume self.model is a dict of params for Flax Linen in this simplified design
             # (In reality, Flax Trainer would need model.init or params passed in)
             return self.model
-        
+
         elif self.model_type == "equinox":
             import equinox as eqx
             return eqx.filter(self.model, eqx.is_array)
-        
+
         else:
             raise ValueError("Unsupported model type")
-            
-    def _setup_optimizer(self, params):
+
+    def _setup_optimizer(self, params: PyTree) -> optax.GradientTransformation:
         """Configure an optimizer for the trainable parameter partition."""
         base_opt = self.training_config.optimizer
         if base_opt is None:
@@ -696,24 +726,24 @@ class Trainer:
             )
         return base_opt
 
-    def _learning_rate_at_step(self, step):
+    def _learning_rate_at_step(self, step: int) -> float | None:
         """Return the rate used by a completed optimizer update."""
         schedule = self.training_config.schedule
         if schedule is None:
             if self.training_config.optimizer is not None:
                 return None
-            
+
             return float(self.training_config.learning_rate)
-        
+
         value = schedule(max(0, step - 1))
         return float(jax.device_get(value))
 
-    def _place_batch(self, batch):
+    def _place_batch(self, batch: Batch) -> Batch:
         sharding = self.dataset_config.batch_sharding
         if sharding is None:
             if self._mesh is None:
                 return jax.tree.map(jax.device_put, batch)
-            
+
             sharding = jax.sharding.NamedSharding(
                 self._mesh,
                 jax.sharding.PartitionSpec(),
@@ -724,7 +754,7 @@ class Trainer:
                 lambda value: jax.device_put(value, sharding),
                 batch,
             )
-        
+
         return jax.tree.map(
             lambda value, value_sharding: jax.device_put(
                 value,
@@ -734,7 +764,7 @@ class Trainer:
             sharding,
         )
 
-    def _evaluate_params(self, params):
+    def _evaluate_params(self, params: PyTree) -> dict[str, float]:
         dataloader = self._validation_dataloader
         if dataloader is None:
             raise ValueError(
@@ -760,7 +790,7 @@ class Trainer:
                 self._compiled_eval_step is None
                 and self.training_config.jit_compile
             ):
-                def evaluate_loss(candidate, value, rng):
+                def evaluate_loss(candidate: Any, value: Any, rng: Any) -> Any:
                     if self._loss_accepts_rng:
                         return self.loss_fn(
                             candidate,
@@ -801,7 +831,7 @@ class Trainer:
                     raise TypeError(
                         'compute_metrics must return a mapping'
                     )
-                
+
                 batch_metric_names = set(batch_metrics)
                 if expected_metric_names is None:
                     expected_metric_names = batch_metric_names
@@ -811,13 +841,13 @@ class Trainer:
                         'compute_metrics must return the same metric names '
                         'for every validation batch'
                     )
-                
+
                 for name, metric_value in batch_metrics.items():
                     if not isinstance(name, str) or not name:
                         raise TypeError(
                             'Custom metric names must be non-empty strings'
                         )
-                    
+
                     metric_name = (
                         name if name.startswith('eval_') else f'eval_{name}'
                     )
@@ -825,13 +855,13 @@ class Trainer:
                         raise ValueError(
                             'compute_metrics cannot replace eval_loss'
                         )
-                    
+
                     metric_array = jnp.asarray(metric_value)
                     if metric_array.ndim != 0:
                         raise ValueError(
                             f'Custom metric {name!r} must be scalar'
                         )
-                    
+
                     metric_values.setdefault(metric_name, []).append(
                         float(jax.device_get(metric_array))
                     )
@@ -842,7 +872,7 @@ class Trainer:
             raise ValueError(
                 'validation_dataloader produced no evaluation batches'
             )
-        
+
         metrics = {
             'eval_loss': sum(losses) / len(losses),
         }
@@ -853,7 +883,7 @@ class Trainer:
 
         return metrics
 
-    def evaluate(self):
+    def evaluate(self) -> dict[str, float]:
         """Evaluate the current model using ``validation_dataloader``."""
         params = self.extract_params()
         parameter_mesh = _parameter_mesh(params)
@@ -870,7 +900,13 @@ class Trainer:
         self._call_event('on_evaluate', metrics=dict(record))
         return metrics
 
-    def _record_evaluation(self, params, *, step, epoch):
+    def _record_evaluation(
+        self,
+        params: PyTree,
+        *,
+        step: int,
+        epoch: int,
+    ) -> tuple[dict[str, float], bool]:
         metrics = self._evaluate_params(params)
         record = {
             'step': step,
@@ -887,7 +923,7 @@ class Trainer:
             raise ValueError(
                 f'Evaluation did not produce metric {metric_name!r}'
             )
-        
+
         metric = float(metrics[metric_name])
         greater_is_better = self.training_config.greater_is_better
         if greater_is_better is None:
@@ -911,13 +947,13 @@ class Trainer:
         self._call_event('on_evaluate', metrics=dict(record))
         return metrics, is_best
 
-    def _checkpoint_directory(self, step):
+    def _checkpoint_directory(self, step: int) -> str:
         return os.path.join(
             os.fspath(self.training_config.output_dir),
             f'checkpoint-{step}',
         )
 
-    def _checkpoint_paths(self):
+    def _checkpoint_paths(self) -> list[tuple[int, str]]:
         output_dir = self.training_config.output_dir
         if output_dir is None or not os.path.isdir(output_dir):
             return []
@@ -932,7 +968,7 @@ class Trainer:
         checkpoints.sort()
         return checkpoints
 
-    def _rotate_checkpoints(self):
+    def _rotate_checkpoints(self) -> None:
         limit = self.training_config.save_total_limit
         if limit is None:
             return
@@ -968,14 +1004,14 @@ class Trainer:
             if path in retained
         ]
 
-    def _resolve_resume_checkpoint(self, checkpoint):
+    def _resolve_resume_checkpoint(self, checkpoint: PathLike) -> str:
         if checkpoint != 'latest':
             checkpoint_path = os.fspath(checkpoint)
             if not os.path.isdir(checkpoint_path):
                 raise FileNotFoundError(
                     f'Resume checkpoint was not found: {checkpoint_path}'
                 )
-            
+
             return checkpoint_path
 
         if self.training_config.output_dir is None:
@@ -987,10 +1023,10 @@ class Trainer:
             raise FileNotFoundError(
                 'No checkpoint-* directories were found in output_dir'
             )
-        
+
         return checkpoints[-1][1]
 
-    def _load_resume_state(self, checkpoint_path):
+    def _load_resume_state(self, checkpoint_path: str) -> dict[str, Any]:
         trainer_state_path = os.path.join(
             checkpoint_path,
             'trainer_state.json',
@@ -1000,7 +1036,7 @@ class Trainer:
             raise FileNotFoundError(
                 f'Trainer state was not found: {trainer_state_path}'
             )
-        
+
         with open(trainer_state_path) as trainer_state_file:
             state = json.load(trainer_state_file)
 
@@ -1010,13 +1046,13 @@ class Trainer:
                 raise ValueError(
                     f'trainer_state.json has invalid {key}: {value!r}'
                 )
-            
+
         history = state.get('log_history', [])
         if not isinstance(history, list):
             raise ValueError(
                 'trainer_state.json log_history must be a list'
             )
-        
+
         accumulation_steps = state.get('gradient_accumulation_steps', 1)
         if accumulation_steps != (
             self.training_config.gradient_accumulation_steps
@@ -1031,17 +1067,17 @@ class Trainer:
                 raise ValueError(
                     f'trainer_state.json has invalid {key}: {value!r}'
                 )
-            
+
         loss_scale = state.get('loss_scale', self._initial_loss_scale())
         if not isinstance(loss_scale, (int, float)) or loss_scale <= 0:
             raise ValueError(
                 'trainer_state.json has invalid loss_scale: '
                 f'{loss_scale!r}'
             )
-        
+
         return state
 
-    def _load_checkpoint_model(self, checkpoint_path):
+    def _load_checkpoint_model(self, checkpoint_path: str) -> None:
         model_state_path = os.path.join(
             checkpoint_path,
             'model_state',
@@ -1054,7 +1090,7 @@ class Trainer:
                     'Distributed model-state checkpoints currently require '
                     'a Taktiny Module'
                 )
-            
+
             target = self.model.flat_state_dict()
             checkpointer = ocp.StandardCheckpointer()
             try:
@@ -1101,7 +1137,7 @@ class Trainer:
                 'Resume checkpoint contains both full-model and adapter '
                 'weights'
             )
-        
+
         if has_adapter:
             from taktiny.takt import Takt
 
@@ -1111,7 +1147,7 @@ class Trainer:
                 local=True,
             )
             return
-        
+
         if not has_model:
             raise FileNotFoundError(
                 'Resume checkpoint contains neither model nor adapter '
@@ -1124,18 +1160,18 @@ class Trainer:
                 f'{type(self.model).__name__} cannot load full model '
                 'checkpoints in place'
             )
-        
+
         load_pretrained(checkpoint_path)
 
     def _write_trainer_state(
         self,
-        checkpoint_path,
+        checkpoint_path: str,
         *,
-        step,
-        epoch,
-        step_in_epoch,
-        state=None,
-    ):
+        step: int,
+        epoch: int,
+        step_in_epoch: int,
+        state: Mapping[str, Any] | None = None,
+    ) -> None:
         if state is None:
             state = self._trainer_state(
                 step=step,
@@ -1162,7 +1198,13 @@ class Trainer:
             if os.path.isfile(temporary_path):
                 os.remove(temporary_path)
 
-    def _trainer_state(self, *, step, epoch, step_in_epoch):
+    def _trainer_state(
+        self,
+        *,
+        step: int,
+        epoch: int,
+        step_in_epoch: int,
+    ) -> dict[str, Any]:
         return {
             'global_step': step,
             'epoch': epoch,
@@ -1180,26 +1222,26 @@ class Trainer:
         }
 
     @staticmethod
-    def _host_snapshot(tree):
-        def copy_leaf(value):
+    def _host_snapshot(tree: PyTree) -> PyTree:
+        def copy_leaf(value: Any) -> Any:
             value = jax.device_get(value)
             if isinstance(value, np.ndarray):
                 return np.array(value, copy=True)
-            
+
             return copy.deepcopy(value)
 
         return jax.tree.map(copy_leaf, tree)
 
     @staticmethod
-    def _sync_hosts(name):
+    def _sync_hosts(name: str) -> None:
         if jax.process_count() <= 1:
             return
-        
+
         from jax.experimental import multihost_utils
 
         multihost_utils.sync_global_devices(name)
 
-    def _finalize_checkpoint(self, checkpoint_path):
+    def _finalize_checkpoint(self, checkpoint_path: str) -> None:
         if jax.process_index() == 0:
             if checkpoint_path not in self.saved_checkpoints:
                 self.saved_checkpoints.append(checkpoint_path)
@@ -1220,15 +1262,15 @@ class Trainer:
 
     def _write_checkpoint_directory(
         self,
-        temporary_path,
-        checkpoint_path,
+        temporary_path: str,
+        checkpoint_path: str,
         *,
-        model_snapshot,
-        optimizer_state,
-        dataloader_state,
-        rng_state,
-        trainer_state,
-    ):
+        model_snapshot: Any,
+        optimizer_state: PyTree,
+        dataloader_state: tuple[str, Any] | None,
+        rng_state: Mapping[str, Any],
+        trainer_state: Mapping[str, Any],
+    ) -> str:
         is_primary = jax.process_index() == 0
         is_multihost = jax.process_count() > 1
         barrier_name = os.path.basename(checkpoint_path)
@@ -1344,10 +1386,10 @@ class Trainer:
             # original exception on the failing host rather than masking it.
             raise
 
-    def _drain_pending_checkpoint(self):
+    def _drain_pending_checkpoint(self) -> str | None:
         if self._pending_checkpoint is None:
             return None
-        
+
         checkpoint_path, future = self._pending_checkpoint
         self._pending_checkpoint = None
         try:
@@ -1363,14 +1405,14 @@ class Trainer:
 
     def _save_checkpoint(
         self,
-        step,
-        trainable_params,
-        frozen_params,
-        opt_state,
+        step: int,
+        trainable_params: PyTree,
+        frozen_params: PyTree,
+        opt_state: PyTree,
         *,
-        epoch,
-        step_in_epoch,
-    ):
+        epoch: int,
+        step_in_epoch: int,
+    ) -> str:
         supports_checkpoint = (
             callable(getattr(self.model, 'save_pretrained', None))
             or (
@@ -1395,7 +1437,7 @@ class Trainer:
             temporary_path = (
                 f'{checkpoint_path}.tmp-{uuid.uuid4().hex}'
             )
-            
+
         dataloader_state = self._capture_dataloader_state()
         rng_state = self._capture_rng_state()
         trainer_state = self._trainer_state(
@@ -1458,14 +1500,14 @@ class Trainer:
 
     def _ensure_checkpoint(
         self,
-        step,
-        trainable_params,
-        frozen_params,
-        opt_state,
+        step: int,
+        trainable_params: PyTree,
+        frozen_params: PyTree,
+        opt_state: PyTree,
         *,
-        epoch,
-        step_in_epoch,
-    ):
+        epoch: int,
+        step_in_epoch: int,
+    ) -> str:
         checkpoint_path = self._checkpoint_directory(step)
         if (
             self._pending_checkpoint is not None
@@ -1491,8 +1533,8 @@ class Trainer:
             epoch=epoch,
             step_in_epoch=step_in_epoch,
         )
-            
-    def train(self, resume_from_checkpoint=None):
+
+    def train(self, resume_from_checkpoint: PathLike | None = None) -> None:
         """Train the configured model, optionally resuming a checkpoint.
 
         Args:
@@ -1655,11 +1697,11 @@ class Trainer:
 
         # 2. Define independently compilable gradient and optimizer phases.
         def calculate_loss(
-            candidate_trainable,
-            current_frozen,
-            batch,
-            rng,
-        ):
+            candidate_trainable: Any,
+            current_frozen: Any,
+            batch: Any,
+            rng: Any,
+        ) -> Any:
             current_params = _combine_params(
                 candidate_trainable,
                 current_frozen,
@@ -1675,12 +1717,12 @@ class Trainer:
         use_loss_scaling = self.training_config.loss_scale is not None
 
         def scaled_loss(
-            candidate_trainable,
-            current_frozen,
-            batch,
-            current_loss_scale,
-            rng,
-        ):
+            candidate_trainable: Any,
+            current_frozen: Any,
+            batch: Any,
+            current_loss_scale: Any,
+            rng: Any,
+        ) -> tuple[Any, ...]:
             loss = calculate_loss(
                 candidate_trainable,
                 current_frozen,
@@ -1692,12 +1734,12 @@ class Trainer:
         loss_and_grad = jax.value_and_grad(scaled_loss, has_aux=True)
 
         def gradient_step(
-            current_trainable,
-            current_frozen,
-            batch,
-            current_loss_scale,
-            rng,
-        ):
+            current_trainable: Any,
+            current_frozen: Any,
+            batch: Any,
+            current_loss_scale: Any,
+            rng: Any,
+        ) -> tuple[Any, ...]:
             (_, loss), grads = loss_and_grad(
                 current_trainable,
                 current_frozen,
@@ -1715,7 +1757,7 @@ class Trainer:
                 )
             return loss, grads
 
-        def optimizer_step(current_trainable, current_opt_state, grads):
+        def optimizer_step(current_trainable: Any, current_opt_state: Any, grads: Any) -> tuple[Any, ...]:
             updates, new_opt_state = optimizer.update(
                 grads,
                 current_opt_state,
@@ -1816,7 +1858,7 @@ class Trainer:
                 loss=float(loss) if loss is not None else 0.0,
             )
 
-            def finish_accumulation(current_epoch, current_step_in_epoch):
+            def finish_accumulation(current_epoch: Any, current_step_in_epoch: Any) -> None:
                 nonlocal accumulated_grads
                 nonlocal accumulated_loss
                 nonlocal accumulated_microbatches
@@ -2313,8 +2355,8 @@ class Trainer:
         self._before_train_end()
         self._call_event('on_train_end')
         console.print("[bold green]✨ Training complete![/bold green]")
-        
-    def _inject_params(self, params):
+
+    def _inject_params(self, params: PyTree) -> None:
         if self.model_type == "taktiny":
             # The returned PyTree is a new taktiny Module. We can update self.model in-place.
             self.model.load_state_dict(params.state_dict())

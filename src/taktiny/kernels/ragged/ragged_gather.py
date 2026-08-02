@@ -14,6 +14,10 @@
 # limitations under the License.
 
 """Ragged gather kernel implementation from tpu-inference."""
+from __future__ import annotations
+
+from typing import Any
+
 # Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/sparse_core/ragged_gather.py
 
 import functools
@@ -44,7 +48,7 @@ def main_kernel(
     core_axis_name: str,
     subcore_axis_name: str,
     has_weights: bool,
-):
+) -> None:
   """Core ragged gather operation with per-row weighting."""
   tpu_info = pltpu.get_tpu_info()
   sc_info = tpu_info.sparse_core
@@ -87,7 +91,7 @@ def main_kernel(
       core_axis_name=(core_axis_name, subcore_axis_name),
       dimension_semantics=(pltpu.ARBITRARY, pltpu.PARALLEL, pltpu.ARBITRARY),
   )
-  def inner_kernel():
+  def inner_kernel() -> None:
     block_id = pl.program_id(0)
     core_id = pl.program_id(1)
     col_id = pl.program_id(2)
@@ -96,7 +100,7 @@ def main_kernel(
     col_tile_start = col_id * col_size
 
     @pl.when(col_id == 0)
-    def _():
+    def _() -> None:
       pltpu.sync_copy(
           indices_hbm_ref.at[pl.ds(row_tile_start, num_simd_lanes)],
           indices_vmem_ref,
@@ -139,7 +143,7 @@ def main_kernel(
     # Use dynamic loop to minimize register spills.
     @pl.loop(0, col_size, step=num_lanes)
     @jax.named_scope("dma_write_loop")
-    def dma_write_loop(col_vmem_start):
+    def dma_write_loop(col_vmem_start: Any) -> None:
       col_hbm_start = col_tile_start + col_vmem_start
 
       # Wait for data to be received.

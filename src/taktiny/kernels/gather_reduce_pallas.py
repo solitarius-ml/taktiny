@@ -19,6 +19,10 @@ This module contains a Pallas kernel implementation for performing a
 gather-reduce operation on TPU SparseCore. It groups rows of an operand
 based on provided indices, sums them up, and scatters the results.
 """
+from __future__ import annotations
+
+from typing import Any
+
 
 import functools
 
@@ -98,7 +102,7 @@ def sc_gather_reduce(
       ),
       compiler_params=pltpu.CompilerParams(needs_layout_passes=True, use_tc_tiling_on_sc=True),
   )
-  def kernel(in_hbm_ref, idx_hbm_ref, weights_hbm_ref, out_hbm_ref):
+  def kernel(in_hbm_ref: Any, idx_hbm_ref: Any, weights_hbm_ref: Any, out_hbm_ref: Any) -> None:
     row_wave_size = row_chunk_size * lax.axis_size(("core", "subcore"))
     if M % row_wave_size:
       raise NotImplementedError(
@@ -116,7 +120,7 @@ def sc_gather_reduce(
     in_specs = (in_spec,) * (1 + (weights_hbm_ref is not None))
 
     @functools.partial(pltpu.emit_pipeline, grid=(num_row_chunks,), in_specs=in_specs)
-    def idx_pipeline(idx_ref, weights_ref=None):
+    def idx_pipeline(idx_ref: Any, weights_ref: Any=None) -> None:
       row_chunk_idx = subcore_first_row_chunk + pl.program_id(0)
 
       row_subchunk_size = sc_info.num_lanes
@@ -144,7 +148,7 @@ def sc_gather_reduce(
               lambda r, c: (row_chunk_idx * num_row_subchunks + r, c),
           ),
       )
-      def data_pipeline(gather_ref, out_ref):
+      def data_pipeline(gather_ref: Any, out_ref: Any) -> None:
         gather_ref = gather_ref.bitcast(op.dtype)
         out_ref = out_ref.bitcast(op.dtype)
 
@@ -155,7 +159,7 @@ def sc_gather_reduce(
         unpack_col_chunk = 32  # 32 seems to works best when tuning.
 
         @plsc.parallel_loop(0, col_chunk_size, step=unpack_col_chunk)
-        def _(col_base):
+        def _(col_base: Any) -> None:
           accs = []
           for reduce_group in range(out_rows_per_step):
             acc = jnp.zeros((unpack_col_chunk,), dtype=jnp.float32)

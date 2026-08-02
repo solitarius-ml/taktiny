@@ -13,12 +13,14 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 from numbers import Number
 import os
 
 
-def _numeric_logs(logs):
+def _numeric_logs(logs: Any) -> Any:
     return {
         name: value
         for name, value in logs.items()
@@ -30,34 +32,34 @@ def _numeric_logs(logs):
 class TrainerCallback:
     """Base class for Trainer lifecycle callbacks."""
 
-    def on_train_begin(self, trainer):
+    def on_train_begin(self, trainer: Any) -> None:
         pass
 
-    def on_step_end(self, trainer, logs):
+    def on_step_end(self, trainer: Any, logs: Any) -> None:
         pass
 
-    def on_log(self, trainer, logs):
+    def on_log(self, trainer: Any, logs: Any) -> None:
         pass
 
-    def on_save(self, trainer, checkpoint_path):
+    def on_save(self, trainer: Any, checkpoint_path: str) -> None:
         pass
 
-    def on_evaluate(self, trainer, metrics):
+    def on_evaluate(self, trainer: Any, metrics: Any) -> None:
         pass
 
-    def on_train_end(self, trainer):
+    def on_train_end(self, trainer: Any) -> None:
         pass
 
 
 class TensorBoardCallback(TrainerCallback):
     """Write Trainer logs through a TensorBoard SummaryWriter."""
 
-    def __init__(self, log_dir=None, *, writer=None):
+    def __init__(self, log_dir: Any=None, *, writer: Any=None) -> None:
         self.log_dir = log_dir
         self.writer = writer
         self._owns_writer = writer is None
 
-    def _get_writer(self, trainer):
+    def _get_writer(self, trainer: Any) -> Any:
         if self.writer is not None:
             return self.writer
 
@@ -81,7 +83,7 @@ class TensorBoardCallback(TrainerCallback):
         self.writer = SummaryWriter(log_dir=log_dir)
         return self.writer
 
-    def on_log(self, trainer, logs):
+    def on_log(self, trainer: Any, logs: Any) -> None:
         writer = self._get_writer(trainer)
         step = int(logs.get('step', trainer.global_step))
         is_evaluation = any(
@@ -96,11 +98,11 @@ class TensorBoardCallback(TrainerCallback):
                 name = name.removeprefix('eval_')
             writer.add_scalar(f'{namespace}/{name}', value, step)
 
-    def on_save(self, trainer, checkpoint_path):
+    def on_save(self, trainer: Any, checkpoint_path: str) -> None:
         if self.writer is not None:
             self.writer.flush()
 
-    def on_train_end(self, trainer):
+    def on_train_end(self, trainer: Any) -> None:
         if self.writer is None:
             return
         self.writer.flush()
@@ -114,13 +116,13 @@ class WandbCallback(TrainerCallback):
 
     def __init__(
         self,
-        project=None,
+        project: Any=None,
         *,
-        name=None,
-        config=None,
-        run=None,
-        **init_kwargs,
-    ):
+        name: str | None=None,
+        config: Any=None,
+        run: Any=None,
+        **init_kwargs: Any,
+    ) -> None:
         self.project = project
         self.name = name
         self.config = config
@@ -128,7 +130,7 @@ class WandbCallback(TrainerCallback):
         self.init_kwargs = init_kwargs
         self._owns_run = run is None
 
-    def _get_run(self):
+    def _get_run(self) -> Any:
         if self.run is not None:
             return self.run
         try:
@@ -145,13 +147,13 @@ class WandbCallback(TrainerCallback):
         )
         return self.run
 
-    def on_log(self, trainer, logs):
+    def on_log(self, trainer: Any, logs: Any) -> None:
         run = self._get_run()
         values = _numeric_logs(logs)
         step = int(values.pop('step', trainer.global_step))
         run.log(values, step=step)
 
-    def on_train_end(self, trainer):
+    def on_train_end(self, trainer: Any) -> None:
         if self.run is not None and self._owns_run:
             self.run.finish()
             self.run = None

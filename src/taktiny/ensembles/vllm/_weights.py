@@ -14,6 +14,8 @@
 """Lazy weight views used by the vLLM synchronization adapters."""
 
 from __future__ import annotations
+from typing import Any
+
 
 from collections.abc import Callable, Iterator
 import math
@@ -28,13 +30,13 @@ from taktiny.nn.module import Module, iter_children
 WeightMapper = Callable[[str, object], tuple[str, object] | None]
 
 
-def _dequantize(value):
+def _dequantize(value: Any) -> Any:
     if isinstance(value, qwix.QArray):
         return qwix.dequantize(value)
     return value
 
 
-def _compact_parameter(name, parameters):
+def _compact_parameter(name: str, parameters: Any) -> Any:
     parameter = parameters.get(name)
     if parameter is not None:
         return parameter
@@ -51,10 +53,10 @@ def _compact_parameter(name, parameters):
     return None
 
 
-def _lora_scalings(model):
+def _lora_scalings(model: Any) -> Any:
     scalings = {}
 
-    def collect(module, prefix=''):
+    def collect(module: Any, prefix: str='') -> None:
         for name, child in iter_children(module):
             child_prefix = f'{prefix}.{name}' if prefix else name
             if isinstance(child, LoRALinear):
@@ -66,7 +68,7 @@ def _lora_scalings(model):
     return scalings
 
 
-def _expanded_lora_scaling(name, scalings):
+def _expanded_lora_scaling(name: str, scalings: Any) -> Any:
     prefix = name.removesuffix('.base_layer.weight')
     scaling = scalings.get(prefix)
     if scaling is not None:
@@ -84,7 +86,7 @@ def _expanded_lora_scaling(name, scalings):
     raise ValueError(f'LoRA scaling metadata is missing for {prefix!r}')
 
 
-def _expanded_state_and_parameters(model):
+def _expanded_state_and_parameters(model: Any) -> tuple[Any, ...]:
     flat_state_dict = getattr(model, 'flat_state_dict', None)
     flat_parameter_dict = getattr(model, 'flat_parameter_dict', None)
     if not callable(flat_state_dict) or not callable(flat_parameter_dict):
@@ -100,7 +102,7 @@ def _expanded_state_and_parameters(model):
     return state, flat_parameter_dict()
 
 
-def iter_internal_weight_specs(model):
+def iter_internal_weight_specs(model: Any) -> Any:
     """Yield logical names, shapes, and parameter metadata without merging."""
     state, parameters = _expanded_state_and_parameters(model)
     for name, value in state.items():
@@ -113,7 +115,7 @@ def iter_internal_weight_specs(model):
         yield logical_name, value.shape, parameter
 
 
-def iter_internal_weights(model) -> Iterator[tuple[str, object, object]]:
+def iter_internal_weights(model: Any) -> Iterator[tuple[str, object, object]]:
     """Yield logical TakTiny weights with stacks expanded and LoRA merged."""
     state, parameters = _expanded_state_and_parameters(model)
     scalings = _lora_scalings(model) if isinstance(model, Module) else {}
@@ -155,7 +157,7 @@ def iter_internal_weights(model) -> Iterator[tuple[str, object, object]]:
         yield logical_name, value, parameter
 
 
-def _checkpoint_weight(name, value, parameter):
+def _checkpoint_weight(name: str, value: Any, parameter: Any) -> tuple[Any, ...]:
     if name.endswith('.embed_tokens.embedding'):
         name = name.removesuffix('.embedding') + '.weight'
 
@@ -171,7 +173,7 @@ def _checkpoint_weight(name, value, parameter):
 
 
 def iter_checkpoint_weights(
-    model,
+    model: Any,
     mapper: WeightMapper | None = None,
 ) -> Iterator[tuple[str, object]]:
     """Yield Hugging Face checkpoint-format names and tensor layouts."""

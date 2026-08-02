@@ -16,6 +16,8 @@
 # ==============================================================================
 
 """Implementation of Ring Attention."""
+from __future__ import annotations
+
 
 import dataclasses
 import functools
@@ -118,7 +120,7 @@ def _ring_attention_forward(
   l_init = jnp.zeros((o_shape[0], o_shape[1]), jnp.float32)
   m_init = jnp.full_like(l_init, mask_value, dtype=jnp.float32)
 
-  def body(carry, i: int):
+  def body(carry: Any, i: int) -> tuple[Any, ...]:
     m_prev, l_prev, o_prev, k_current, v_current, segment_ids_current = carry
 
     current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
@@ -196,7 +198,7 @@ def _ring_attention_bwd(
     # Residuals and gradients
     res: Any,
     do: jax.Array,
-):
+) -> tuple[Any, ...]:
   del save_residuals
   (q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info) = res
   do = do.astype(jnp.float32)
@@ -217,7 +219,7 @@ def _ring_attention_bwd(
   dv_accum = jnp.zeros(v.shape, dtype=jnp.float32)
   dsinks = sinks
 
-  def body(carry, i: int):
+  def body(carry: Any, i: int) -> tuple[Any, ...]:
     (
         dq_accum,
         dk_accum,
@@ -555,15 +557,15 @@ class RingSplashAttentionKernel:
       dkv_mask_info: MaskInfo | None,
       ring_axis: str,
       expected_ring_size: int,
-      **kwargs,
-  ):
+      **kwargs: Any,
+  ) -> None:
     self.fwd_mask_info = fwd_mask_info
     self.dkv_mask_info = dkv_mask_info
     self.ring_axis = ring_axis
     self.expected_ring_size = expected_ring_size
     self.kwargs = kwargs
 
-  def __call__(self, *args, **kwargs):
+  def __call__(self, *args: Any, **kwargs: Any) -> Any:
     reserved_kwargs = set(self.kwargs) | {"ring_axis", "expected_ring_size"}
     overrides = reserved_kwargs.intersection(kwargs)
     if overrides:
@@ -582,7 +584,7 @@ class RingSplashAttentionKernel:
         ),
     )
 
-  def manual_sharding_spec(self):
+  def manual_sharding_spec(self) -> Any:
     """Ring attention expects MaskInfo metadata to be sharded by Q shard.
 
     Each local Q shard slices the current KV shard metadata at each ring step.
@@ -592,7 +594,7 @@ class RingSplashAttentionKernel:
     spec = jax.sharding.PartitionSpec(self.ring_axis)
     _resolve_spec = lambda x: spec if x is not None else None
 
-    def mask_info_spec(mask_info):
+    def mask_info_spec(mask_info: Any) -> Any:
       if mask_info is None:
         return None
       return MaskInfo(  # pytype: disable=wrong-arg-types
@@ -616,7 +618,7 @@ class RingSplashAttentionKernel:
         **self.kwargs,
     )
 
-  def tree_flatten(self):
+  def tree_flatten(self) -> tuple[Any, ...]:
     children = (self.fwd_mask_info, self.dkv_mask_info)
     aux_data = self.kwargs.copy()
     aux_data["ring_axis"] = self.ring_axis
@@ -624,7 +626,7 @@ class RingSplashAttentionKernel:
     return children, aux_data
 
   @classmethod
-  def tree_unflatten(cls, aux_data, children):
+  def tree_unflatten(cls, aux_data: Any, children: Any) -> Any:
     fwd_mask_info, dkv_mask_info = children
     dkv_mask_info = mask_info_lib.MaskInfo(*dkv_mask_info) if dkv_mask_info is not None else None
     return cls(
@@ -646,7 +648,7 @@ def make_ring_attention(
     ring_axis: str,
     q_seq_shards: int = 1,
     kv_seq_shards: int = 1,
-):
+) -> Any:
   """Creates a RingSplashAttentionKernel.
 
   Args:

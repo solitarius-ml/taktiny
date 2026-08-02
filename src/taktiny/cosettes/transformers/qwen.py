@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 import jax
 import jax.numpy as jnp
@@ -29,16 +31,16 @@ class QwenRotaryEmbedding(RotaryEmbedding):
 
     def __init__(
         self,
-        dim,
-        max_position_embeddings,
-        base,
+        dim: Any,
+        max_position_embeddings: Any,
+        base: Any,
         *,
-        use_dynamic_ntk=True,
-    ):
+        use_dynamic_ntk: bool=True,
+    ) -> None:
         super().__init__(dim, max_position_embeddings, base)
         self.use_dynamic_ntk = use_dynamic_ntk
 
-    def __call__(self, q, k, position_idx=None):
+    def __call__(self, q: Any, k: Any, position_idx: int | None=None) -> tuple[Any, ...]:
         seq_len = q.shape[1]
         position_start = (
             jnp.asarray(0, dtype=jnp.int32)
@@ -102,7 +104,7 @@ class QwenRotaryEmbedding(RotaryEmbedding):
             cos = jnp.cos(emb)[:, :, None, :]
             sin = jnp.sin(emb)[:, :, None, :]
 
-        def apply_rotary(x):
+        def apply_rotary(x: Any) -> Any:
             dtype = x.dtype
             x = x.astype(jnp.float32)
             return ((x * cos) + (rotate_half(x) * sin)).astype(dtype)
@@ -115,12 +117,12 @@ class QwenAttention(Attention):
 
     def __init__(
         self,
-        *args,
-        seq_length,
-        use_logn_attn=True,
-        output_bias=False,
-        **kwargs,
-    ):
+        *args: Any,
+        seq_length: Any,
+        use_logn_attn: bool=True,
+        output_bias: bool=False,
+        **kwargs: Any,
+    ) -> None:
         self.seq_length = seq_length
         self.use_logn_attn = use_logn_attn
         kwargs.update(
@@ -132,7 +134,7 @@ class QwenAttention(Attention):
         )
         super().__init__(*args, **kwargs)
 
-    def _scale_query(self, query, position_idx=None):
+    def _scale_query(self, query: Any, position_idx: int | None=None) -> Any:
         if not self.use_logn_attn:
             return query
 
@@ -175,19 +177,19 @@ class QwenMLP(GateMLP):
 
     def __init__(
         self,
-        hidden_size,
-        intermediate_size,
-        activation=jax.nn.silu,
-        bias=False,
-        dtype=None,
-        rngs=None,
-        gate_axis_names=None,
-        up_axis_names=None,
-        down_axis_names=None,
-        shard_mode=ShardMode.AUTO,
-        quant=None,
-        dot_general=None,
-    ):
+        hidden_size: int,
+        intermediate_size: int,
+        activation: Any=jax.nn.silu,
+        bias: bool=False,
+        dtype: Any=None,
+        rngs: Any=None,
+        gate_axis_names: Any=None,
+        up_axis_names: Any=None,
+        down_axis_names: Any=None,
+        shard_mode: Any=ShardMode.AUTO,
+        quant: Any=None,
+        dot_general: Any=None,
+    ) -> None:
         self.activation = (
             activation
             if callable(activation)
@@ -228,7 +230,7 @@ class QwenMLP(GateMLP):
             dot_general=dot_general,
         )
 
-    def __call__(self, x, out_sharding=None):
+    def __call__(self, x: Any, out_sharding: Any=None) -> Any:
         return self.c_proj(
             self.w1(x) * self.activation(self.w2(x)),
             out_sharding=out_sharding,
@@ -236,7 +238,7 @@ class QwenMLP(GateMLP):
 
 
 class QwenDecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         shard_mode = getattr(config, 'shard_mode', ShardMode.AUTO)
         quant = getattr(config, 'quant', None)
         dot_general = getattr(config, 'dot_general', None)
@@ -285,7 +287,7 @@ class QwenDecoderLayer(TransformerDecoderLayer):
 class Qwen2Attention(Attention):
     """Qwen2 attention with bias on Q/K/V projections only."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.update(
             bias=False,
             q_bias=True,
@@ -297,7 +299,7 @@ class Qwen2Attention(Attention):
 
 
 class Qwen2DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         super().__init__(
             config,
             rngs=rngs,
@@ -312,7 +314,7 @@ class Qwen2DecoderLayer(TransformerDecoderLayer):
 class Qwen3Attention(Attention):
     """Qwen3 bias-free attention with per-head Q/K normalization."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.update(
             bias=False,
             q_bias=False,
@@ -327,7 +329,7 @@ class Qwen3Attention(Attention):
 class Qwen3DecoderLayer(TransformerDecoderLayer):
     """Qwen3 decoder layer with normalized query and key projections."""
 
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         super().__init__(
             config,
             rngs=rngs,
