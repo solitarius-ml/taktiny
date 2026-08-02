@@ -14,6 +14,10 @@
 # limitations under the License.
 
 """Ragged gather reduce kernel implementation from tpu-inference."""
+from __future__ import annotations
+
+from typing import Any
+
 # Source from experimental/users/kyuyeunk/vllm/kernels/sparse_core/ragged_gather_reduce.py
 
 import functools
@@ -26,7 +30,7 @@ import jax.numpy as jnp
 
 
 # ceil up to the nearest multiple of b.
-def _align_to(a, b):
+def _align_to(a: Any, b: Any) -> Any:
   return ((a + b - 1) // b) * b
 
 
@@ -122,7 +126,7 @@ def main_kernel(
     subcore_axis_name: str,
     num_row_partitions: int,
     num_column_partitions: int,
-):
+) -> None:
   """Main Pallas kernel for ragged gather and reduction on SparseCore."""
   tpu_info = pltpu.get_tpu_info()
   sc_info = tpu_info.sparse_core
@@ -141,7 +145,7 @@ def main_kernel(
       core_axis_name=(core_axis_name, subcore_axis_name),
       dimension_semantics=(pltpu.PARALLEL,),
   )
-  def inner_kernel():
+  def inner_kernel() -> None:
     core_id = pl.program_id(0)
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
@@ -170,7 +174,7 @@ def main_kernel(
     col_start = col_partition_id * col_size
 
     @pl.loop(0, num_row_tiles)
-    def row_loop(row_block_id):
+    def row_loop(row_block_id: Any) -> None:
       row_tile_start = row_start + row_block_id * num_simd_lanes
       # The destination row from the last source row in the previous row tile,
       # retrieve it before DMA the new data into `dst_indices_vmem_ref`.
@@ -229,7 +233,7 @@ def main_kernel(
       # Use dynamic loop to minimize register spills.
       @pl.loop(0, col_size, step=num_lanes, init_carry=(prev_dst_row_hbm,))
       @jax.named_scope("dma_write_loop")
-      def dma_write_loop(col_vmem_start, carry):
+      def dma_write_loop(col_vmem_start: Any, carry: Any) -> Any:
         col_hbm_start = col_start + col_vmem_start
 
         for _ in range(num_simd_lanes):

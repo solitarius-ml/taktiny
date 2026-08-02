@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """TODO: Flux model"""
+from __future__ import annotations
+
 
 from taktiny.cosettes.schedulers.euler.flow_match_discrete import FlowMatchEulerDiscreteScheduler
 from taktiny.cosettes.transformers.flux import Flux2Transformer2DModel
@@ -20,5 +22,5 @@ from taktiny.cosettes._common import DiffusionIM
 
 
 class Flux2(DiffusionIM):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()

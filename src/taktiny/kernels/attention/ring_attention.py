@@ -33,7 +33,7 @@ from taktiny.kernels.attention.tokamax_splash import ring_attention_kernel
 from taktiny.kernels.attention.tokamax_splash import splash_attention_kernel as tokamax_splash_kernel
 from taktiny.kernels.attention.tokamax_splash import splash_attention_mask as tokamax_splash_mask
 
-def reorder_mask_load_balancing(tensor, cp_size: int, seq_dim: int):
+def reorder_mask_load_balancing(tensor: Any, cp_size: int, seq_dim: int) -> Any:
     seq_len = tensor.shape[seq_dim]
     group_size = seq_len // (2 * cp_size)
     if cp_size % 2 != 0:
@@ -297,7 +297,7 @@ def build_splash_config(
   )
 
 
-def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int, *, load_balanced: bool = False):
+def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int, *, load_balanced: bool = False) -> Any:
   """Builds a lazy causal mask for ring attention."""
   if context_parallel_size <= 1:
     raise ValueError("context_parallel_size must be > 1 for ring attention.")
@@ -320,7 +320,7 @@ def make_sharded_ring_attention_kernel(
     ring_axis: str,
     attn_logits_soft_cap: float | None,
     maybe_shard_with_pspec: Any,
-):
+) -> tuple[Any, ...]:
   """Builds and shards the Tokamax ring attention kernel for MaxText."""
   splash_config = build_splash_config(
       config,
@@ -339,7 +339,7 @@ def make_sharded_ring_attention_kernel(
   )
 
   @functools.partial(jax.jit, static_argnames=["single_head_mask"])
-  def wrap_ring_kernel(single_head_mask):
+  def wrap_ring_kernel(single_head_mask: Any) -> Any:
     return ring_attention_kernel.make_ring_attention(
         single_head_mask,
         config=splash_config,
@@ -368,14 +368,14 @@ def call_ring_attention(
     decoder_segment_ids_q: Any,
     decoder_segment_ids_kv: Any,
     ring_kernel: Any,
-):
+) -> Any:
   """Calls a Tokamax ring attention kernel over the MaxText batch dimension."""
   if (decoder_segment_ids_q is None) != (decoder_segment_ids_kv is None):
     raise ValueError("decoder_segment_ids_q and decoder_segment_ids_kv must both be set or both be None.")
   if decoder_segment_ids_q is None:
     return jax.vmap(lambda q, k, v: ring_kernel(q, k, v, None), in_axes=(0, 0, 0))(query, key, value)
 
-  def call_one(q, k, v, q_segment_ids, kv_segment_ids):
+  def call_one(q: Any, k: Any, v: Any, q_segment_ids: Any, kv_segment_ids: Any) -> Any:
     segment_ids = ring_attention_kernel.SegmentIds(q_segment_ids, kv_segment_ids)
     return ring_kernel(q, k, v, segment_ids)
 

@@ -14,11 +14,11 @@
 """Attention modules"""
 
 from __future__ import annotations
-
+from collections.abc import Callable
+from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import math
-from typing import NamedTuple, Optional
 
 from taktiny import nn
 from taktiny.layers.posemb import RotaryEmbedding
@@ -34,34 +34,34 @@ class SegmentIds(NamedTuple):
 
 class Attention(nn.Module):
     def __init__(
-        self, 
-        hidden_size: int, 
+        self,
+        hidden_size: int,
         num_heads: int,
-        head_dim: int, 
-        num_kv_heads: int = None,
-        context_dim: int = None,
-        pos_emb: nn.Module = None,
-        bias: bool = False, 
+        head_dim: int,
+        num_kv_heads: int | None = None,
+        context_dim: int | None = None,
+        pos_emb: nn.Module | None = None,
+        bias: bool = False,
         use_qkv_norm: bool = False,
         qkv_norm_eps: float = 1e-5,
-        dtype: DType | str = None,
-        window_size: int = None,
-        rngs: nn.Rngs = None,
-        q_axis_names: Optional[tuple[str | None, ...]] = None,
-        k_axis_names: Optional[tuple[str | None, ...]] = None,
-        v_axis_names: Optional[tuple[str | None, ...]] = None,
-        o_axis_names: Optional[tuple[str | None, ...]] = None,
-        q_bias: Optional[bool] = None,
-        k_bias: Optional[bool] = None,
-        v_bias: Optional[bool] = None,
-        o_bias: Optional[bool] = None,
-        scaling: Optional[float] = None,
-        softcap: Optional[float] = None,
+        dtype: DType | str | None = None,
+        window_size: int | None = None,
+        rngs: nn.Rngs | None = None,
+        q_axis_names: tuple[str | None, ...] | None = None,
+        k_axis_names: tuple[str | None, ...] | None = None,
+        v_axis_names: tuple[str | None, ...] | None = None,
+        o_axis_names: tuple[str | None, ...] | None = None,
+        q_bias: bool | None = None,
+        k_bias: bool | None = None,
+        v_bias: bool | None = None,
+        o_bias: bool | None = None,
+        scaling: float | None = None,
+        softcap: float | None = None,
         dropout: float | int = 0.0,
         shard_mode: ShardMode = ShardMode.AUTO,
-        quant=None,
-        dot_general=None,
-    ):
+        quant: Any=None,
+        dot_general: Any=None,
+    ) -> None:
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -78,10 +78,10 @@ class Attention(nn.Module):
         self.scaling = scaling
         self.softcap = softcap
         self.dropout = dropout
-        
+
         # For Grouped Query Attention (GQA)
         self.num_kv_groups = self.num_heads // self.num_kv_heads
-        
+
         self.pos_emb = pos_emb
         if bias and any(
             value is not None
@@ -92,27 +92,27 @@ class Attention(nn.Module):
             k_bias = k_bias is True
             v_bias = v_bias is True
             o_bias = o_bias is True
-        
+
         # Projections (Leveraging General Linear!)
         self.q_proj = nn.Linear(
-            hidden_size, (self.num_heads, self.head_dim), 
-            dtype=dtype, bias=q_bias or bias, rngs=rngs, 
-            axis_names=q_axis_names, shard_mode=shard_mode, 
+            hidden_size, (self.num_heads, self.head_dim),
+            dtype=dtype, bias=q_bias or bias, rngs=rngs,
+            axis_names=q_axis_names, shard_mode=shard_mode,
             quant=quant, dot_general=dot_general
         )
         self.k_proj = nn.Linear(
-            self.context_dim, (self.num_kv_heads, self.head_dim), 
-            dtype=dtype, bias=k_bias or bias, rngs=rngs, axis_names=k_axis_names, 
+            self.context_dim, (self.num_kv_heads, self.head_dim),
+            dtype=dtype, bias=k_bias or bias, rngs=rngs, axis_names=k_axis_names,
             shard_mode=shard_mode, quant=quant, dot_general=dot_general
         )
         self.v_proj = nn.Linear(
-            self.context_dim, (self.num_kv_heads, self.head_dim), 
-            dtype=dtype, bias=v_bias or bias, rngs=rngs, axis_names=v_axis_names, 
+            self.context_dim, (self.num_kv_heads, self.head_dim),
+            dtype=dtype, bias=v_bias or bias, rngs=rngs, axis_names=v_axis_names,
             shard_mode=shard_mode, quant=quant, dot_general=dot_general
         )
         self.o_proj = nn.Linear(
-            (self.num_heads, self.head_dim), hidden_size, 
-            dtype=dtype, bias=o_bias or bias, rngs=rngs, axis_names=o_axis_names, 
+            (self.num_heads, self.head_dim), hidden_size,
+            dtype=dtype, bias=o_bias or bias, rngs=rngs, axis_names=o_axis_names,
             shard_mode=shard_mode, quant=quant, dot_general=dot_general
         )
 
@@ -126,7 +126,7 @@ class Attention(nn.Module):
                 axis_names=('head_dim',),
                 shard_mode=shard_mode,
             )
-            
+
         if getattr(self, 'use_qkv_norm', False) or getattr(self, 'use_k_norm', False):
             self.k_norm = nn.RMSNorm(
                 self.head_dim,
@@ -139,7 +139,7 @@ class Attention(nn.Module):
     def _scale_query(
         self,
         query: jax.Array,
-        position_idx: jax.Array = None,
+        position_idx: jax.Array | None = None,
     ) -> jax.Array:
         return query
 
@@ -234,7 +234,7 @@ class Attention(nn.Module):
     @classmethod
     def _normalize_segment_ids(
         cls,
-        segment_ids,
+        segment_ids: SegmentIds | jax.Array | None,
         *,
         batch_size: int,
         query_length: int,
@@ -269,7 +269,10 @@ class Attention(nn.Module):
         return SegmentIds(query_segments, key_segments)
 
     @staticmethod
-    def _merge_segment_mask(mask, segment_ids: SegmentIds):
+    def _merge_segment_mask(
+        mask: jax.Array | None,
+        segment_ids: SegmentIds,
+    ) -> jax.Array:
         segment_mask = (
             segment_ids.q[:, None, :, None]
             == segment_ids.kv[:, None, None, :]
@@ -277,21 +280,21 @@ class Attention(nn.Module):
         if mask is None:
             return segment_mask
         return jnp.asarray(mask, dtype=jnp.bool_) & segment_mask
-        
+
     @classmethod
     def apply_flash_attention(
         cls,
         query: jax.Array,
         key: jax.Array,
         value: jax.Array,
-        segment_ids=None,
+        segment_ids: SegmentIds | jax.Array | None = None,
         block_kv: int = 128,
         block_q: int = 128,
-        mask: jax.Array = None,
+        mask: jax.Array | None = None,
         mask_value: float = -1e9,
-        cap: float = None,
-        scale: float = None,
-        **kwargs,
+        cap: float | None = None,
+        scale: float | None = None,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply FlashAttention block masked kernel on Q, K, V."""
         from taktiny.kernels.attention.flash_attention import flash_attention_block_masked
@@ -351,11 +354,11 @@ class Attention(nn.Module):
         query: jax.Array,
         key: jax.Array,
         value: jax.Array,
-        lengths: jax.Array = None,
-        scale: float = None,
+        lengths: jax.Array | None = None,
+        scale: float | None = None,
         block_size: int = 256,
         interpret: bool | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply the decode-only Ragged Attention kernel."""
         from taktiny.kernels.attention.ragged_attention import (
@@ -415,10 +418,10 @@ class Attention(nn.Module):
         query: jax.Array,
         key: jax.Array,
         value: jax.Array,
-        mask=None,
-        segment_ids=None,
-        scale: float = None,
-        **kwargs,
+        mask: jax.Array | None = None,
+        segment_ids: SegmentIds | None = None,
+        scale: float | None = None,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply the Splash Attention reference with dense masks."""
         from taktiny.kernels.attention.splash_attention import attention_reference
@@ -482,7 +485,12 @@ class Attention(nn.Module):
             axis=1,
         )
 
-        def apply_head(q, k, v, head_mask):
+        def apply_head(
+            q: jax.Array,
+            k: jax.Array,
+            v: jax.Array,
+            head_mask: jax.Array,
+        ) -> jax.Array:
             out = attention_reference(
                 head_mask,
                 q,
@@ -505,10 +513,10 @@ class Attention(nn.Module):
         key: jax.Array,
         value: jax.Array,
         *,
-        ring_kernel=None,
-        segment_ids=None,
-        scale: float = None,
-        **kwargs,
+        ring_kernel: Callable[..., jax.Array] | None = None,
+        segment_ids: SegmentIds | None = None,
+        scale: float | None = None,
+        **kwargs: Any,
     ) -> jax.Array:
         """Apply a prebuilt Ring Splash Attention kernel."""
         from taktiny.kernels.attention.tokamax_splash import (
@@ -547,7 +555,13 @@ class Attention(nn.Module):
                     'batched ring segment IDs must match the query batch'
                 )
 
-            def apply_one(q, k, v, q_segments, kv_segments):
+            def apply_one(
+                q: jax.Array,
+                k: jax.Array,
+                v: jax.Array,
+                q_segments: jax.Array,
+                kv_segments: jax.Array,
+            ) -> jax.Array:
                 segments = ring_attention_kernel.SegmentIds(
                     q_segments,
                     kv_segments,
@@ -572,12 +586,12 @@ class Attention(nn.Module):
         key: jax.Array,
         value: jax.Array,
         kernel: str = "dot_product",
-        mask: jax.Array = None,
-        bias: jax.Array = None,
-        scale: float = None,
+        mask: jax.Array | None = None,
+        bias: jax.Array | None = None,
+        scale: float | None = None,
         is_causal: bool = False,
-        segment_ids=None,
-        **kwargs,
+        segment_ids: SegmentIds | jax.Array | None = None,
+        **kwargs: Any,
     ) -> jax.Array:
         """
         Unified Entry Point for Attention Kernel Applications.
@@ -680,19 +694,19 @@ class Attention(nn.Module):
             )
 
     def __call__(
-        self, 
-        x: jax.Array, 
-        context: jax.Array = None,
-        attention_mask: jax.Array = None, 
+        self,
+        x: jax.Array,
+        context: jax.Array | None = None,
+        attention_mask: jax.Array | None = None,
         is_causal: bool = False,
-        kv_cache: tuple[jax.Array, jax.Array] = None,
-        position_idx: jax.Array = None,
-        out_sharding = None,
+        kv_cache: tuple[jax.Array, jax.Array] | None = None,
+        position_idx: jax.Array | None = None,
+        out_sharding: jax.sharding.Sharding | None = None,
         kernel: str = "dot_product",
     ) -> jax.Array | tuple[jax.Array, tuple[jax.Array, jax.Array]]:
-        
+
         context_in = context if context is not None else x
-        
+
         # Project directly to [B, L, Heads, HeadDim] thanks to General Linear
         q = self.q_proj(x)
         k = self.k_proj(context_in)
@@ -702,7 +716,7 @@ class Attention(nn.Module):
             q = self.q_norm(q)
         if self.k_norm is not None:
             k = self.k_norm(k)
-        
+
         # Apply Positional Embeddings (if provided)
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, position_idx)
@@ -728,7 +742,7 @@ class Attention(nn.Module):
                     packed_segments,
                     packed_segments,
                 )
-        
+
         if kv_cache is not None:
             k_cache, v_cache = kv_cache
             cache_position = jnp.asarray(position_idx, dtype=jnp.int32)
@@ -744,7 +758,11 @@ class Attention(nn.Module):
                     (0, cache_position, 0, 0),
                 )
             elif cache_position.ndim == 1:
-                def update_cache(cache_row, value_row, row_position):
+                def update_cache(
+                    cache_row: jax.Array,
+                    value_row: jax.Array,
+                    row_position: jax.Array,
+                ) -> jax.Array:
                     return jax.lax.dynamic_update_slice(
                         cache_row,
                         value_row,
@@ -765,11 +783,11 @@ class Attention(nn.Module):
                 raise ValueError(
                     'position_idx must be a scalar or a batch vector'
                 )
-            
+
             # Use the full cache for attention
             k = k_cache
             v = v_cache
-            
+
         # Sliding Window / Causal Masking
         if is_causal or self.window_size is not None:
             if self.window_size is not None:
@@ -843,7 +861,7 @@ class Attention(nn.Module):
 
                 # The absolute-position mask handles causality itself.
                 is_causal = False
-            
+
         attention_bias = None
         if self.softcap is not None:
             scale = (
@@ -885,47 +903,47 @@ class Attention(nn.Module):
             is_causal=is_causal,
             segment_ids=segment_ids,
         )
-        
+
         # Output projection from (Batch, SeqLen, Heads, HeadDim) directly to (Batch, SeqLen, HiddenSize)
         out = self.o_proj(out, out_sharding=out_sharding)
-        
+
         if kv_cache is not None:
             return out, (k_cache, v_cache)
-        
+
         return out, None
 
 class JointAttention(nn.Module):
     """
     Generic Joint/Double-Stream Attention for Multimodal architectures (e.g. MM-DiT).
-    Takes two separate streams, projects them to Q, K, V independently, 
+    Takes two separate streams, projects them to Q, K, V independently,
     concatenates them for a joint self-attention operation, and splits the output back.
     """
     def __init__(
-        self, 
-        hidden_size1: int, 
-        hidden_size2: int, 
+        self,
+        hidden_size1: int,
+        hidden_size2: int,
         num_heads: int,
         head_dim: int,
         use_qkv_norm: bool = False,
-        pos_emb: nn.Module = None,
-        seed: nn.Rngs = None
-    ):
+        pos_emb: nn.Module | None = None,
+        seed: nn.Rngs | None = None
+    ) -> None:
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.pos_emb = pos_emb
-        
+
         # Stream 1 Projections
         self.q_proj_1 = nn.Linear(hidden_size1, num_heads * head_dim, bias=False, seed=seed)
         self.k_proj_1 = nn.Linear(hidden_size1, num_heads * head_dim, bias=False, seed=seed)
         self.v_proj_1 = nn.Linear(hidden_size1, num_heads * head_dim, bias=False, seed=seed)
         self.o_proj_1 = nn.Linear(num_heads * head_dim, hidden_size1, bias=False, seed=seed)
-        
+
         # Stream 2 Projections
         self.q_proj_2 = nn.Linear(hidden_size2, num_heads * head_dim, bias=False, seed=seed)
         self.k_proj_2 = nn.Linear(hidden_size2, num_heads * head_dim, bias=False, seed=seed)
         self.v_proj_2 = nn.Linear(hidden_size2, num_heads * head_dim, bias=False, seed=seed)
         self.o_proj_2 = nn.Linear(num_heads * head_dim, hidden_size2, bias=False, seed=seed)
-        
+
         if use_qkv_norm:
             self.q_norm_1 = nn.RMSNorm(head_dim)
             self.k_norm_1 = nn.RMSNorm(head_dim)
@@ -934,34 +952,34 @@ class JointAttention(nn.Module):
         else:
             self.q_norm_1 = self.k_norm_1 = None
             self.q_norm_2 = self.k_norm_2 = None
-            
+
     def __call__(
-        self, 
-        x1: jax.Array, 
+        self,
+        x1: jax.Array,
         x2: jax.Array,
         # We can pass modulation chunks dynamically (like from AdaLN)
-        mod1: tuple[jax.Array, ...] = None,
-        mod2: tuple[jax.Array, ...] = None,
-        position_idx: jax.Array = None
+        mod1: tuple[jax.Array, ...] | None = None,
+        mod2: tuple[jax.Array, ...] | None = None,
+        position_idx: jax.Array | None = None
     ) -> tuple[jax.Array, jax.Array]:
         B, L1, _ = x1.shape
         _, L2, _ = x2.shape
-        
+
         # 1. Project Stream 1
         q1 = self.q_proj_1(x1).reshape(B, L1, self.num_heads, self.head_dim)
         k1 = self.k_proj_1(x1).reshape(B, L1, self.num_heads, self.head_dim)
         v1 = self.v_proj_1(x1).reshape(B, L1, self.num_heads, self.head_dim)
-        
+
         # 2. Project Stream 2
         q2 = self.q_proj_2(x2).reshape(B, L2, self.num_heads, self.head_dim)
         k2 = self.k_proj_2(x2).reshape(B, L2, self.num_heads, self.head_dim)
         v2 = self.v_proj_2(x2).reshape(B, L2, self.num_heads, self.head_dim)
-        
+
         # 3. Apply QK Norms if specified
         if self.q_norm_1 is not None:
             q1, k1 = self.q_norm_1(q1), self.k_norm_1(k1)
             q2, k2 = self.q_norm_2(q2), self.k_norm_2(k2)
-            
+
         # 4. Apply specific modulations if provided by caller (e.g. DiT scale/shift)
         # mod is expected to be (shift_q, scale_q, shift_k, scale_k, shift_v, scale_v) or None
         if mod1 is not None:
@@ -969,38 +987,38 @@ class JointAttention(nn.Module):
             shift_q1, scale_q1 = shift_q1.reshape(B, 1, self.num_heads, self.head_dim), scale_q1.reshape(B, 1, self.num_heads, self.head_dim)
             shift_k1, scale_k1 = shift_k1.reshape(B, 1, self.num_heads, self.head_dim), scale_k1.reshape(B, 1, self.num_heads, self.head_dim)
             shift_v1, scale_v1 = shift_v1.reshape(B, 1, self.num_heads, self.head_dim), scale_v1.reshape(B, 1, self.num_heads, self.head_dim)
-            
+
             q1 = q1 * (1 + scale_q1) + shift_q1
             k1 = k1 * (1 + scale_k1) + shift_k1
             v1 = v1 * (1 + scale_v1) + shift_v1
-            
+
         if mod2 is not None:
             shift_q2, scale_q2, shift_k2, scale_k2, shift_v2, scale_v2 = mod2
             shift_q2, scale_q2 = shift_q2.reshape(B, 1, self.num_heads, self.head_dim), scale_q2.reshape(B, 1, self.num_heads, self.head_dim)
             shift_k2, scale_k2 = shift_k2.reshape(B, 1, self.num_heads, self.head_dim), scale_k2.reshape(B, 1, self.num_heads, self.head_dim)
             shift_v2, scale_v2 = shift_v2.reshape(B, 1, self.num_heads, self.head_dim), scale_v2.reshape(B, 1, self.num_heads, self.head_dim)
-            
+
             q2 = q2 * (1 + scale_q2) + shift_q2
             k2 = k2 * (1 + scale_k2) + shift_k2
             v2 = v2 * (1 + scale_v2) + shift_v2
-            
+
         # 5. Concatenate streams for joint attention!
         q = jnp.concatenate([q1, q2], axis=1)
         k = jnp.concatenate([k1, k2], axis=1)
         v = jnp.concatenate([v1, v2], axis=1)
-        
+
         # Apply Positional Embeddings (e.g. RoPE)
         if self.pos_emb is not None:
             q, k = self.pos_emb(q, k, position_idx)
-            
+
         # 6. Apply JAX native Attention
         out = jax.nn.dot_product_attention(q, k, v)
-        
+
         # 7. Split streams back apart
         out1, out2 = jnp.split(out, [L1], axis=1)
-        
+
         # 8. Final Output Projections
         out1 = self.o_proj_1(out1.reshape(B, L1, -1))
         out2 = self.o_proj_2(out2.reshape(B, L2, -1))
-        
+
         return out1, out2

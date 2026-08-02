@@ -14,6 +14,10 @@
 # limitations under the License.
 
 """Kernels for ragged attention for efficient inference."""
+from __future__ import annotations
+
+from typing import Any
+
 
 import functools
 
@@ -28,7 +32,7 @@ import jax.numpy as jnp
 DEFAULT_MASK_VALUE = -1e9
 
 
-def get_mha_cost_estimate(shape_dtype):
+def get_mha_cost_estimate(shape_dtype: Any) -> Any:
   """Get cost estimate for MHA based on static shape information."""
   batch_size, _, num_heads, head_dim = shape_dtype[0].shape
   seq_len = shape_dtype[1].shape[1]
@@ -161,22 +165,22 @@ def reference_gqa(
 
 
 def ragged_flash_attention_kernel(
-    lengths_ref,
-    q_ref,
-    k_ref,
-    v_ref,
-    o_ref,
-    m_ref,
-    l_ref,
+    lengths_ref: Any,
+    q_ref: Any,
+    k_ref: Any,
+    v_ref: Any,
+    o_ref: Any,
+    m_ref: Any,
+    l_ref: Any,
     *,
     block_size: int,
     mask_value: float,
-):
+) -> None:
   """Pallas kernel for flash attention."""
   b, i = pl.program_id(0), pl.program_id(1)
 
   @pl.when(i == 0)
-  def init():
+  def init() -> None:
     m_ref[...] = jnp.full_like(m_ref, -jnp.inf)
     l_ref[...] = jnp.zeros_like(l_ref)
     o_ref[...] = jnp.zeros_like(o_ref)
@@ -184,7 +188,7 @@ def ragged_flash_attention_kernel(
   length = lengths_ref[b]
 
   @pl.when(i * block_size < length)
-  def run():
+  def run() -> None:
     q = q_ref[...].astype(jnp.float32)
     k = k_ref[...].astype(jnp.float32)
     v = v_ref[...].astype(jnp.float32)
@@ -243,7 +247,7 @@ def ragged_mqa(
   assert lengths.dtype == jnp.int32
   seq_len = k.shape[1]
 
-  def compute_ragged_block_indices(b, i, lengths_ref):
+  def compute_ragged_block_indices(b: Any, i: Any, lengths_ref: Any) -> tuple[Any, ...]:
     length = lengths_ref[b]
     not_done = i * block_size < length
     am_last_batch = b == batch_size - 1

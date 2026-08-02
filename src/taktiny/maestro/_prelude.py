@@ -17,11 +17,14 @@ if implemented in this library.
 """
 
 from __future__ import annotations
-
+from collections.abc import Mapping
+from typing import Any
 from taktiny.maestro import opus
 from taktiny.maestro._config import ModelConfig
 from taktiny.maestro._livret import repertoire
 from taktiny.nn import Rngs
+from taktiny.nn.module import Module
+from taktiny.utils.typing import DType, LogicalRules, PathLike
 
 import jax
 from jax.sharding import Mesh
@@ -60,7 +63,7 @@ class Maestro:
     """
 
     @classmethod
-    def list(cls):
+    def list(cls) -> set[type[Module]]:
         """Return the distinct model implementation classes in the registry.
 
         Multiple architecture names may resolve to the same implementation, so
@@ -70,9 +73,9 @@ class Maestro:
             A set of registered Taktiny model classes.
         """
         return repertoire.available_classes()
-    
+
     @classmethod
-    def available(cls):
+    def available(cls) -> list[str]:
         """Return all registered Hugging Face architecture names.
 
         The returned strings are the values expected in the ``architectures``
@@ -82,9 +85,9 @@ class Maestro:
             A list of registered architecture names.
         """
         return repertoire.available()
-    
+
     @classmethod
-    def supported(cls, model_class: str):
+    def supported(cls, model_class: str) -> bool:
         """Check whether an architecture name is registered.
 
         Args:
@@ -95,18 +98,18 @@ class Maestro:
             ``True`` when the architecture can be resolved by Maestro.
         """
         return True if model_class in repertoire.available() else False
-    
+
     @classmethod
     def from_pretrained(
-        cls, 
-        repo_or_path, 
-        mesh=None, 
-        sharding_rules=None, 
-        local=False,
-        dtype=None,
-        quant=None,
-        **kwargs
-    ):
+        cls,
+        repo_or_path: PathLike,
+        mesh: Mesh | Mapping[str, int] | None = None,
+        sharding_rules: LogicalRules | None = None,
+        local: bool = False,
+        dtype: DType | str | None = None,
+        quant: Any = None,
+        **kwargs: Any
+    ) -> Module:
         """Load a registered model and materialize its checkpoint weights.
 
         The architecture is selected from the model configuration's
@@ -153,30 +156,30 @@ class Maestro:
             exit(0)
 
         keys = config_dict.get('architectures', [])
-        
+
         assert len(keys) == 1, \
             'Unsupported architectures.'
 
         key = keys[0]
         if key not in repertoire.available():
             raise NotImplementedError("Unsupported architectures.")
-            
+
         model_cls = repertoire.get(key)
-        
+
         # Parse Mesh if provided as a dict (e.g. {'data': 4, 'model': 2})
         if isinstance(mesh, dict):
             axis_names = tuple(mesh.keys())
             shape = tuple(mesh.values())
             devices = mesh_utils.create_device_mesh(shape)
             mesh = Mesh(devices, axis_names)
-            
+
         if sharding_rules is None and hasattr(model_cls, 'default_sharding_rules'):
             sharding_rules = model_cls.default_sharding_rules
-            
+
         return model_cls.from_pretrained(
-            repo_or_path, 
-            mesh=mesh, 
-            sharding_rules=sharding_rules, 
+            repo_or_path,
+            mesh=mesh,
+            sharding_rules=sharding_rules,
             local=local,
             dtype=dtype,
             quant=quant,
@@ -186,12 +189,12 @@ class Maestro:
     @classmethod
     def eval_shape(
         cls,
-        repo_or_path,
-        mesh=None,
-        sharding_rules=None,
-        local=False,
-        **kwargs,
-    ):
+        repo_or_path: PathLike,
+        mesh: Mesh | Mapping[str, int] | None = None,
+        sharding_rules: LogicalRules | None = None,
+        local: bool = False,
+        **kwargs: Any,
+    ) -> Module:
         """Construct an abstract registered model without loading its weights.
 
         This resolves the architecture in the same way as

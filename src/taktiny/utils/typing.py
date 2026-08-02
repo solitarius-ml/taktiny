@@ -11,22 +11,92 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Common types use across modules"""
+"""Shared type aliases and protocols used across TakTiny."""
 
+from __future__ import annotations
+
+from collections.abc import Callable, Iterator, Mapping, Sequence
 import enum
-import jax.numpy as jnp
-from jax.typing import DTypeLike, ArrayLike
-from typing import Sequence
+from os import PathLike as OSPathLike
+from typing import Any, Protocol, TypeAlias, TypeVar, runtime_checkable
+
+import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from jax.typing import ArrayLike as JaxArrayLike
+from jax.typing import DTypeLike
 
 
-AxisName = str | tuple[str, ...] | None
-LogicalRules = Sequence[tuple[str, AxisName]]
+Array: TypeAlias = jax.Array
+ArrayLike: TypeAlias = JaxArrayLike
+DType: TypeAlias = DTypeLike
+PRNGKey: TypeAlias = jax.Array
+PyTree: TypeAlias = Any
+Shape: TypeAlias = Sequence[int]
+Axes: TypeAlias = int | Sequence[int]
+AxisName: TypeAlias = str | tuple[str | None, ...] | None
+AxisNames: TypeAlias = tuple[str | None, ...]
+LogicalRules: TypeAlias = Sequence[tuple[str, AxisName]]
+Sharding: TypeAlias = NamedSharding | PartitionSpec | None
+MeshLike: TypeAlias = Mesh | None
+PathLike: TypeAlias = str | OSPathLike[str]
+Batch: TypeAlias = Mapping[str, PyTree]
+MutableBatch: TypeAlias = dict[str, PyTree]
+StateDict: TypeAlias = dict[str, PyTree]
+ParameterDict: TypeAlias = dict[str, Any]
+ModuleFactory: TypeAlias = Callable[..., Any]
+LossFn: TypeAlias = Callable[[Any, Batch], Array]
 
-Array = ArrayLike
-DType = DTypeLike
-Shape = Sequence[int]
+T = TypeVar('T')
 
 
 class ShardMode(enum.Enum):
+    """Select automatic constraints or explicit output shardings."""
+
     AUTO = 'auto'
     EXPLICIT = 'explicit'
+
+
+@runtime_checkable
+class StatefulIterator(Protocol[T]):
+    """Iterator whose cursor can be checkpointed and restored."""
+
+    def __iter__(self) -> Iterator[T]: ...
+
+    def __next__(self) -> T: ...
+
+    def get_state(self) -> PyTree: ...
+
+    def set_state(self, state: PyTree) -> None: ...
+
+
+@runtime_checkable
+class EpochAware(Protocol):
+    """Data source that supports deterministic epoch selection."""
+
+    def set_epoch(self, epoch: int) -> None: ...
+
+
+__all__ = [
+    'Array',
+    'ArrayLike',
+    'Axes',
+    'AxisName',
+    'AxisNames',
+    'Batch',
+    'DType',
+    'EpochAware',
+    'LogicalRules',
+    'LossFn',
+    'MeshLike',
+    'ModuleFactory',
+    'MutableBatch',
+    'PRNGKey',
+    'ParameterDict',
+    'PathLike',
+    'PyTree',
+    'Shape',
+    'ShardMode',
+    'Sharding',
+    'StateDict',
+    'StatefulIterator',
+]

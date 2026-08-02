@@ -15,6 +15,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 import jax, jax.numpy as jnp
 from jax.nn.initializers import normal
@@ -28,13 +30,13 @@ from taktiny.utils.typing import ShardMode
 
 class GemmaTextScaledWordEmbedding(nn.Embedding):
     def __init__(
-        self, num_embeddings: int, 
-        embedding_dim: int, *, 
-        rngs: nn.Rngs = None, 
-        dtype=jnp.float32,
-        initializer = normal(0.02),
-        quant=None,
-    ):
+        self, num_embeddings: int,
+        embedding_dim: int, *,
+        rngs: nn.Rngs | None = None,
+        dtype: Any=jnp.float32,
+        initializer: Any = normal(0.02),
+        quant: Any=None,
+    ) -> None:
         super().__init__(
             num_embeddings,
             embedding_dim,
@@ -45,27 +47,27 @@ class GemmaTextScaledWordEmbedding(nn.Embedding):
         )
         self.embedding_scale = embedding_dim ** 0.5
 
-    def __call__(self, indices: jax.Array):
+    def __call__(self, indices: jax.Array) -> Any:
         return super().__call__(indices) * self.embedding_scale
-    
+
 
 class GemmaRMSNorm(nn.RMSNorm):
-    def __call__(self, x, out_sharding=None):
+    def __call__(self, x: Any, out_sharding: Any=None) -> Any:
         dtype = x.dtype
         var = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
         x_norm = x * jax.lax.rsqrt(var + self.eps)
-        
+
         if self.with_scale:
             x_norm = x_norm * (1.0 + self.weight)
-            
+
         if self.shard_mode == ShardMode.EXPLICIT and out_sharding is not None:
             x_norm = jax.lax.with_sharding_constraint(x_norm, out_sharding)
-            
+
         return x_norm.astype(dtype)
 
 
 class GemmaDecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         super().__init__(
             config,
             rngs=rngs,
@@ -82,7 +84,7 @@ class Gemma2Attention(Attention):
 
 
 class Gemma2DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         super().__init__(
             config,
             rngs=rngs,
@@ -110,7 +112,7 @@ class Gemma2DecoderLayer(TransformerDecoderLayer):
 class Gemma3TextScaledWordEmbedding(GemmaTextScaledWordEmbedding):
     """Gemma 3 embedding with its scale rounded to the embedding dtype."""
 
-    def __call__(self, indices: jax.Array):
+    def __call__(self, indices: jax.Array) -> Any:
         x = nn.Embedding.__call__(self, indices)
         scale = jnp.asarray(self.embedding_scale, dtype=x.dtype)
         return x * scale
@@ -119,14 +121,14 @@ class Gemma3TextScaledWordEmbedding(GemmaTextScaledWordEmbedding):
 class Gemma3RMSNorm(nn.RMSNorm):
     def __init__(
         self,
-        hidden_size,
-        eps=1e-6,
-        dtype=jnp.float32,
-        with_scale=True,
-        axis_names=None,
-        shard_mode=ShardMode.AUTO,
-        initializer=jnp.zeros,
-    ):
+        hidden_size: int,
+        eps: float=1e-6,
+        dtype: Any=jnp.float32,
+        with_scale: bool=True,
+        axis_names: Any=None,
+        shard_mode: Any=ShardMode.AUTO,
+        initializer: Any=jnp.zeros,
+    ) -> None:
         super().__init__(
             hidden_size,
             eps=eps,
@@ -137,7 +139,7 @@ class Gemma3RMSNorm(nn.RMSNorm):
             initializer=initializer,
         )
 
-    def __call__(self, x, out_sharding=None):
+    def __call__(self, x: Any, out_sharding: Any=None) -> Any:
         dtype = x.dtype
         x = x.astype(jnp.float32)
         variance = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
@@ -160,12 +162,12 @@ class Gemma3Attention(Attention):
 
     def __init__(
         self,
-        *args,
-        norm_eps=1e-6,
-        norm_dtype=jnp.float32,
-        shard_mode=ShardMode.AUTO,
-        **kwargs,
-    ):
+        *args: Any,
+        norm_eps: float=1e-6,
+        norm_dtype: Any=jnp.float32,
+        shard_mode: Any=ShardMode.AUTO,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, shard_mode=shard_mode, **kwargs)
         self.q_norm = Gemma3RMSNorm(
             self.head_dim,
@@ -184,7 +186,7 @@ class Gemma3Attention(Attention):
 
 
 class Gemma3DecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         if layer_idx is None:
             raise ValueError('Gemma3DecoderLayer requires layer_idx')
 

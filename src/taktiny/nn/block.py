@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Utilities modules for stack/group other modules"""
+from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
 from taktiny import transforms as tt
 from taktiny.nn.module import Module
+from taktiny.utils.typing import PyTree
 
 
 def _stack_modules(modules: Iterable[Module]) -> tuple[Module, int]:
@@ -57,19 +60,19 @@ def _stack_modules(modules: Iterable[Module]) -> tuple[Module, int]:
 
 
 class List(Module):
-    def __init__(self, *modules):
+    def __init__(self, *modules: Module) -> None:
         self.layers = list(modules)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Module:
         return self.layers[idx]
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.layers)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Module]:
         return iter(self.layers)
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         return f"{len(self.layers)}"
 
 
@@ -77,37 +80,49 @@ class Dict(Module): ...
 
 
 class Sequential(Module):
-    def __init__(self, *modules):
+    def __init__(self, *modules: Module) -> None:
         self.layers = tuple(modules)
 
-    def __call__(self, x, *args, **kwargs):
+    def __call__(self, x: PyTree, *args: Any, **kwargs: Any) -> PyTree:
         for layer in self.layers:
             x = layer(x, *args, **kwargs)
         return x
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         return f"{len(self.layers)}"
 
 class SeqStack(Module):
-    def __init__(self, modules: Iterable[Module]):
+    def __init__(self, modules: Iterable[Module]) -> None:
         self.stacked, self.num_stack = _stack_modules(modules)
 
-    def __call__(self, f, carry, *args, **kwargs):
+    def __call__(
+        self,
+        f: Callable[..., Any],
+        carry: PyTree,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[PyTree, PyTree]:
         @tt.scan()
-        def apply_fn(carry, layer, *broadcast_args):
+        def apply_fn(carry: Any, layer: Any, *broadcast_args: Any) -> Any:
             return f(layer, carry, *broadcast_args, **kwargs)
 
         return apply_fn(carry, self.stacked, *args)
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         return f"{self.num_stack}"
 
 
 class Stack(Module):
-    def __init__(self, modules: Iterable[Module]):
+    def __init__(self, modules: Iterable[Module]) -> None:
         self.stacked, self.num_stack = _stack_modules(modules)
 
-    def __call__(self, *args, in_axes=0, out_axes=0, **kwargs):
+    def __call__(
+        self,
+        *args: Any,
+        in_axes: int | tuple[int | None, ...] = 0,
+        out_axes: int | tuple[int | None, ...] = 0,
+        **kwargs: Any,
+    ) -> PyTree:
         if isinstance(in_axes, tuple):
             if len(in_axes) != len(args):
                 raise ValueError(
@@ -118,12 +133,12 @@ class Stack(Module):
             vmap_in_axes = (0,) + (in_axes,) * len(args)
 
         @tt.vmap(in_axes=vmap_in_axes, out_axes=out_axes)
-        def apply_fn(layer, *positional_args):
+        def apply_fn(layer: Any, *positional_args: Any) -> Any:
             return layer(*positional_args, **kwargs)
 
         return apply_fn(self.stacked, *args)
 
-    def extra_repr(self):
+    def extra_repr(self) -> str:
         return f"{self.num_stack}"
 
 

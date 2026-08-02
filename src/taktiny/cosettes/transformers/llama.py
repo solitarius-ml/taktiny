@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 from taktiny import nn
 from taktiny.cosettes._common import TransformerDecoderLayer
@@ -20,7 +22,7 @@ from taktiny.layers import GateMLP, Attention
 
 
 class LlamaDecoderLayer(TransformerDecoderLayer):
-    def __init__(self, config, rngs: nn.Rngs, layer_idx=None):
+    def __init__(self, config: Any, rngs: nn.Rngs, layer_idx: int | None=None) -> None:
         super().__init__(
             config,
             rngs=rngs,

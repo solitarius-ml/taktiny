@@ -19,6 +19,8 @@ This module contains a kernel implementation for performing a gather-reduce
 operation on TPU SparseCore. It groups rows of an operand based on provided
 indices, sums them up, and scatters the results.
 """
+from __future__ import annotations
+
 
 import array
 import functools
@@ -42,10 +44,10 @@ from jaxlib.mlir.dialects import vector
 class VectorTypeHelper:
   """Helper to create VectorType with a specific element type."""
 
-  def __init__(self, element_type_fn):
+  def __init__(self, element_type_fn: Any) -> None:
     self.element_type_fn = element_type_fn
 
-  def __getitem__(self, shape):
+  def __getitem__(self, shape: Any) -> Any:
     if isinstance(shape, int):
       shape = [shape]
     return ir.VectorType.get(shape, self.element_type_fn())
@@ -177,24 +179,24 @@ def sc_gather_reduce(
     assert row_chunk_size == vreg_size
 
     def _kernel_impl(
-        current_sc_core,
-        current_local_core,
-        idx_ref,
-        op_ref,
-        weights_ref,
-        out_ref,
-        func_op,
-    ):
+        current_sc_core: Any,
+        current_local_core: Any,
+        idx_ref: Any,
+        op_ref: Any,
+        weights_ref: Any,
+        out_ref: Any,
+        func_op: Any,
+    ) -> None:
       constants: dict[tuple[Any, Any], Any] = {}
 
-      def const_lut(val, ty=None):
+      def const_lut(val: Any, ty: Any=None) -> Any:
         ty = index if ty is None else ty
         if (val, ty) not in constants:
           with ir.InsertionPoint.at_block_begin(func_op.entry_block):
             constants[(val, ty)] = arith.constant(ty, ir.IntegerAttr.get(ty, val))
         return constants[(val, ty)]
 
-      def fill_load_offset_tile(offset_tile_local, idx_tile_local, col_pos):
+      def fill_load_offset_tile(offset_tile_local: Any, idx_tile_local: Any, col_pos: Any) -> tuple[Any, ...]:
         """Fills the offset tile for indirect DMA gather.
 
         This function calculates the HBM offsets from which to gather rows
@@ -341,7 +343,7 @@ def sc_gather_reduce(
           scf.YieldOp([])
         return offset_tile_local, parity
 
-      def load_weights(lin_idx, dst_tile, sflag):
+      def load_weights(lin_idx: int, dst_tile: Any, sflag: Any) -> Any:
         """Loads weights from HBM to TileSpMem.
 
         This function calculates offsets for reading weights from HBM based on
@@ -398,12 +400,12 @@ def sc_gather_reduce(
         return parity
 
       def perform_add(
-          scratch_local,
-          scratch_out_local,
-          idx_parity,
-          weights_local=None,
-          parity=None,
-      ):
+          scratch_local: Any,
+          scratch_out_local: Any,
+          idx_parity: Any,
+          weights_local: Any=None,
+          parity: Any=None,
+      ) -> Any:
         """Performs reduction (summation) of rows in scratchpad.
 
         This function reduces `row_chunk_size` rows stored in scratch_local
@@ -527,7 +529,7 @@ def sc_gather_reduce(
             row_add = None
             col_pos = None
 
-          def get_row_val(row_idx):
+          def get_row_val(row_idx: int) -> Any:
             if is_bf16:
               row_idx_l = row_idx * (col_chunk_size // 128)
               vec_bf16_2x16 = tpu.load(
@@ -666,7 +668,7 @@ def sc_gather_reduce(
 
         return scratch_out_local
 
-      def fill_out_offset_tile(offset_tile_out_local, col_pos, row_pos=None):
+      def fill_out_offset_tile(offset_tile_out_local: Any, col_pos: Any, row_pos: Any=None) -> Any:
         """Fills the offset tile for indirect DMA scatter for outputs (bf16).
 
         This function calculates the HBM offsets to scatter the reduced rows
@@ -1517,14 +1519,14 @@ def sc_gather_reduce(
 
       @func.FuncOp.from_py_func(*input_types, name="main")
       def kernel_main(
-          current_sc_core,
-          current_local_core,
-          idx_ref,
-          op_ref,
-          weights_ref,
-          out_ref,
-          func_op,
-      ):
+          current_sc_core: Any,
+          current_local_core: Any,
+          idx_ref: Any,
+          op_ref: Any,
+          weights_ref: Any,
+          out_ref: Any,
+          func_op: Any,
+      ) -> Any:
         return _kernel_impl(
             current_sc_core,
             current_local_core,
@@ -1539,13 +1541,13 @@ def sc_gather_reduce(
 
       @func.FuncOp.from_py_func(*input_types, name="main")
       def kernel_main(
-          current_sc_core,
-          current_local_core,
-          idx_ref,
-          op_ref,
-          out_ref,
-          func_op,
-      ):
+          current_sc_core: Any,
+          current_local_core: Any,
+          idx_ref: Any,
+          op_ref: Any,
+          out_ref: Any,
+          func_op: Any,
+      ) -> Any:
         return _kernel_impl(
             current_sc_core,
             current_local_core,

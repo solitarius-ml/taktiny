@@ -14,6 +14,8 @@
 # limitations under the License.
 
 """Grouped matrix multiplication kernels for TPU written in Pallas."""
+from __future__ import annotations
+
 
 # pylint: disable=too-many-positional-arguments, unnecessary-lambda-assignment
 
@@ -381,14 +383,14 @@ def gmm(
   )
 
   def kernel(
-      group_metadata,
-      group_offset,
+      group_metadata: Any,
+      group_offset: Any,
       lhs: jax.Array | qpl.QArray,
       rhs: jax.Array | qpl.QArray,
-      existing_out,
-      out,
-      acc_scratch,
-  ):
+      existing_out: Any,
+      out: Any,
+      acc_scratch: Any,
+  ) -> None:
     group_offsets, group_ids, m_tile_ids = group_metadata
     del group_offsets, group_ids, group_offset
 
@@ -396,7 +398,7 @@ def gmm(
     k_i = pl.program_id(2)
 
     @pl.when(k_i == 0)
-    def _zero_acc():
+    def _zero_acc() -> None:
       acc_scratch[...] = jnp.zeros_like(acc_scratch)
 
       if existing_out is not None:
@@ -406,17 +408,17 @@ def gmm(
         first_time_seeing_out = jnp.logical_or(is_first_processed_group, m_tile_changed)
 
         @pl.when(first_time_seeing_out)
-        def _init_out():
+        def _init_out() -> None:
           out[...] = existing_out[...]
 
-    def mask_k_rem(x: jax.Array, *, dim: int):
+    def mask_k_rem(x: jax.Array, *, dim: int) -> Any:
       if k_rem == 0:
         return x
 
       iota = lax.broadcasted_iota(jnp.int32, x.shape, dim)
       return jnp.where(iota < k_rem, x, 0).astype(x.dtype)
 
-    def _store_accum():
+    def _store_accum() -> None:
       mask = _get_store_mask(
           grid_id=grid_id,
           group_metadata=group_metadata,
@@ -426,7 +428,7 @@ def gmm(
       to_store = acc_scratch[...]
       out[...] = jax.lax.select(mask[...], to_store, out[...].astype(jnp.float32)).astype(preferred_element_type)
 
-    def _accum(is_last_k_tile):
+    def _accum(is_last_k_tile: Any) -> None:
       if is_last_k_tile:
         mask_k_rem_lhs = functools.partial(mask_k_rem, dim=1)
         mask_k_rem_rhs = functools.partial(mask_k_rem, dim=int(transpose_rhs))
@@ -466,13 +468,13 @@ def gmm(
         functools.partial(_accum, False),
     )
 
-  def lhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
+  def lhs_transform_indices(n_i: Any, grid_id: Any, k_i: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # lhs is (m, k). Load the [tm, tk] matrix for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
     del n_i, group_offsets, group_ids, group_offset
     return m_tile_ids[grid_id], k_i
 
-  def rhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
+  def rhs_transform_indices(n_i: Any, grid_id: Any, k_i: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # rhs is (num_groups, k, n). Load the [tk, tn] matrix based on the group id
     # for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
@@ -485,7 +487,7 @@ def gmm(
     # "unsharded" domain.
     return group_ids[grid_id] - group_offset[0], k_i, n_i
 
-  def out_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
+  def out_transform_indices(n_i: Any, grid_id: Any, k_i: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # out is (m, n). Load the [tm, tn] matrix for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
     del k_i, group_offsets, group_ids, group_offset
@@ -646,14 +648,14 @@ def tgmm(
   )
 
   def kernel(
-      group_metadata,
-      group_offset,
-      lhs,
-      rhs,
-      existing_out,
-      out,
-      acc_scratch,
-  ):
+      group_metadata: Any,
+      group_offset: Any,
+      lhs: Any,
+      rhs: Any,
+      existing_out: Any,
+      out: Any,
+      acc_scratch: Any,
+  ) -> None:
     grid_id = pl.program_id(2)
     group_offsets, group_ids, m_tile_ids = group_metadata
     del group_offsets, group_offset, m_tile_ids
@@ -665,14 +667,14 @@ def tgmm(
     group_has_changed = jnp.logical_or(grid_id == 0, prev_group != group)
 
     @pl.when(group_has_changed)
-    def _zero_acc():
+    def _zero_acc() -> None:
       acc_scratch[...] = jnp.zeros_like(acc_scratch)
 
     # We'll only do computation if our group has a nonzero number of rows in it.
     dont_skip = _get_group_size(grid_id=grid_id, group_metadata=group_metadata) > 0
 
     @pl.when(dont_skip)
-    def _do():
+    def _do() -> None:
       rhs_mask = _get_store_mask(
           grid_id=grid_id,
           group_metadata=group_metadata,
@@ -733,25 +735,25 @@ def tgmm(
     group_is_changing = jnp.logical_or(is_end_of_grid, group != next_group)
 
     @pl.when(group_is_changing)
-    def _store_accum():
+    def _store_accum() -> None:
       to_store = acc_scratch[...]
       if existing_out is not None:
         to_store += existing_out[...].astype(jnp.float32)
       out[...] = to_store.astype(preferred_element_type)
 
-  def lhs_transform_indices(n_i, k_i, grid_id, group_metadata, group_offset):
+  def lhs_transform_indices(n_i: Any, k_i: Any, grid_id: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # lhs is (m, k). Load the [tm, tk] matrix for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
     del n_i, group_offsets, group_ids, group_offset
     return m_tile_ids[grid_id], k_i
 
-  def rhs_transform_indices(n_i, k_i, grid_id, group_metadata, group_offset):
+  def rhs_transform_indices(n_i: Any, k_i: Any, grid_id: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # rhs is (m, n). Load the [tm, tn] matrix for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
     del k_i, group_offsets, group_ids, group_offset
     return m_tile_ids[grid_id], n_i
 
-  def out_transform_indices(n_i, k_i, grid_id, group_metadata, group_offset):
+  def out_transform_indices(n_i: Any, k_i: Any, grid_id: Any, group_metadata: Any, group_offset: Any) -> tuple[Any, ...]:
     # out is (num_groups, k, n). Load the [tk, tn] matrix based on the group id
     # for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata

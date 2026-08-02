@@ -15,6 +15,10 @@
 # limitations under the License.
 # ==============================================================================
 """Base functionality for Sparse Flash Attention."""
+from __future__ import annotations
+
+from typing import Any
+
 
 import functools
 from typing import Final, NamedTuple, TypeAlias
@@ -109,15 +113,15 @@ def _attention_reference_impl(
 
 
 def _attention_reference_custom_bwd(
-    do,
-    q,
-    k,
-    v,
-    mask,
-    segment_ids,
-    sinks,
-    o,
-    logsumexp,
+    do: Any,
+    q: Any,
+    k: Any,
+    v: Any,
+    mask: Any,
+    segment_ids: Any,
+    sinks: Any,
+    o: Any,
+    logsumexp: Any,
     mask_value: float = DEFAULT_MASK_VALUE,
     backward_impl: str = "vanilla",
     attn_logits_soft_cap: float | None = None,
@@ -184,7 +188,7 @@ def attention_reference(
     mask_value: float = DEFAULT_MASK_VALUE,
     save_residuals: bool = False,
     attn_logits_soft_cap: float | None = None,
-):
+) -> Any:
   """A JIT-compiled reference implementation of attention, handles MQA and MHA."""
   attn_impl = functools.partial(
       _attention_reference_impl,
@@ -221,20 +225,20 @@ def attention_reference(
 
 @functools.partial(jax.jit, static_argnames=["is_mqa", "backward_impl", "attn_logits_soft_cap"])
 def attention_reference_vjp(
-    do,
-    q,
-    k,
-    v,
-    mask,
-    segment_ids,
-    sinks,
-    o,
-    logsumexp,
+    do: Any,
+    q: Any,
+    k: Any,
+    v: Any,
+    mask: Any,
+    segment_ids: Any,
+    sinks: Any,
+    o: Any,
+    logsumexp: Any,
     *,
     is_mqa: bool,
     backward_impl: str = "vanilla",
     attn_logits_soft_cap: float | None = None,
-):
+) -> tuple[Any, ...]:
   """Wrapper for backward reference that handles GQA/MQA broadcasting and reduction."""
   bwd = functools.partial(
       _attention_reference_custom_bwd,

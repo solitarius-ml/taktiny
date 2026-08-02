@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from absl import flags
@@ -27,64 +27,64 @@ from grain._src.core.transforms import FlatMap as _FlatMapTransform
 class Map(grain.MapTransform):
     """Adapt a regular callable to a Grain map transformation."""
 
-    def __init__(self, function: Callable[[Any], Any]):
+    def __init__(self, function: Callable[[Any], Any]) -> None:
         if not callable(function):
             raise TypeError('function must be callable')
 
         super().__init__()
         self.function = function
 
-    def map(self, element):
+    def map(self, element: Any) -> Any:
         return self.function(element)
 
 
 class Filter(grain.FilterTransform):
     """Adapt a regular callable to a Grain filter transformation."""
 
-    def __init__(self, function: Callable[[Any], Any]):
+    def __init__(self, function: Callable[[Any], bool]) -> None:
         if not callable(function):
             raise TypeError('function must be callable')
 
         super().__init__()
         self.function = function
 
-    def filter(self, element):
+    def filter(self, element: Any) -> bool:
         return self.function(element)
 
 
 class IndexMap(grain.MapWithIndexTransform):
     """Adapt a regular callable to a Grain map with index transformation."""
 
-    def __init__(self, function: Callable[[Any], Any]):
+    def __init__(self, function: Callable[[int, Any], Any]) -> None:
         if not callable(function):
             raise TypeError('function must be callable')
 
         super().__init__()
         self.function = function
 
-    def map_with_index(self, idx, element):
+    def map_with_index(self, idx: int, element: Any) -> Any:
         return self.function(idx, element)
 
 
 class RandomMap(grain.RandomMapTransform):
     """Adapt a regular callable to a Grain random map transformation."""
 
-    def __init__(self, function: Callable[[Any], Any]):
+    def __init__(self, function: Callable[[Any], Any]) -> None:
         if not callable(function):
             raise TypeError('function must be callable')
 
         super().__init__()
         self.function = function
 
-    def map_with_index(self, element, rng):
+    def map_with_index(self, element: Any, rng: Any) -> Any:
         return self.function(element, rng)
 
 
 class _Unbatch(_FlatMapTransform):
-    def __init__(self, max_fan_out):
+    def __init__(self, max_fan_out: int) -> None:
         self.max_fan_out = max_fan_out
 
-    def flat_map(self, element):
+    def flat_map(self, element: Iterable[Any]) -> Iterable[Any]:
         return element
 
 
@@ -102,7 +102,7 @@ class BatchMap:
         batch_size: int,
         *,
         drop_remainder: bool = False,
-    ):
+    ) -> None:
         if not callable(function):
             raise TypeError('function must be callable')
         if (
@@ -119,7 +119,10 @@ class BatchMap:
         self.drop_remainder = drop_remainder
 
     @staticmethod
-    def _rows_from_mapping(columns, expected_size):
+    def _rows_from_mapping(
+        columns: Mapping[str, Sequence[Any]],
+        expected_size: int,
+    ) -> tuple[dict[str, Any], ...]:
         normalized = {}
         for key, values in columns.items():
             if isinstance(values, (str, bytes)):
@@ -147,7 +150,7 @@ class BatchMap:
             for index in range(expected_size)
         )
 
-    def _map_batch(self, rows):
+    def _map_batch(self, rows: Sequence[Any]) -> tuple[Any, ...]:
         output = self.function(rows)
         if isinstance(output, Mapping):
             return self._rows_from_mapping(output, len(rows))
@@ -167,7 +170,7 @@ class BatchMap:
             )
         return output
 
-    def grain_operations(self):
+    def grain_operations(self) -> tuple[Any, ...]:
         """Return the native Grain transformations for this operation."""
         return (
             grain.Batch(
@@ -180,7 +183,7 @@ class BatchMap:
         )
 
 
-def _expand_operations(operations):
+def _expand_operations(operations: Iterable[Any]) -> tuple[Any, ...]:
     expanded = []
     for operation in operations:
         expand = getattr(operation, 'grain_operations', None)
@@ -191,7 +194,7 @@ def _expand_operations(operations):
     return tuple(expanded)
 
 
-def _prepare_grain_workers():
+def _prepare_grain_workers() -> None:
     """Allow Grain workers to start when Abseil flags are still unparsed."""
     if flags.FLAGS.is_parsed():
         return
@@ -218,7 +221,7 @@ class DatasetUtils:
     @classmethod
     def from_datasets(
         cls,
-        source,
+        source: Sequence[Any],
         *,
         operations: Sequence[Any] = (),
         sampler: grain.Sampler | None = None,

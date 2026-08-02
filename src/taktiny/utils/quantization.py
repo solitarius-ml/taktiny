@@ -14,6 +14,8 @@
 """Quantization helpers."""
 
 from __future__ import annotations
+from typing import Any
+
 
 from collections.abc import Sequence
 import dataclasses
@@ -29,7 +31,7 @@ _QTYPE_ALIASES = {
 }
 
 
-def normalize_qtype(qtype):
+def normalize_qtype(qtype: Any) -> Any:
     if isinstance(qtype, str):
         qtype = qtype.lower()
         if qtype == 'fp4':
@@ -41,7 +43,7 @@ def normalize_qtype(qtype):
     return qtype
 
 
-def quantization_rules(quantization) -> tuple[qwix.QuantizationRule, ...]:
+def quantization_rules(quantization: Any) -> tuple[qwix.QuantizationRule, ...]:
     if quantization is None:
         return ()
     if isinstance(quantization, str):
@@ -64,7 +66,7 @@ def quantization_rules(quantization) -> tuple[qwix.QuantizationRule, ...]:
     )
 
 
-def merge_quantization(quantization, fallback_qtype):
+def merge_quantization(quantization: Any, fallback_qtype: Any) -> Any:
     """Append a uniform fallback after any explicit quantization rules."""
     return (
         quantization_rules(quantization)
@@ -73,11 +75,11 @@ def merge_quantization(quantization, fallback_qtype):
 
 
 def resolve_quantization_rule(
-    quantization,
-    module_path,
+    quantization: Any,
+    module_path: str,
     *,
-    op_name='dot_general',
-):
+    op_name: str='dot_general',
+) -> Any:
     dotted_path = module_path
     slash_path = module_path.replace('.', '/')
     for rule in quantization_rules(quantization):
@@ -102,7 +104,7 @@ def resolve_quantization_rule(
     return None
 
 
-def quantize_linear_weight(array, parameter, rule):
+def quantize_linear_weight(array: Any, parameter: Any, rule: Any) -> Any:
     batch_axis_count = getattr(
         parameter,
         'quantization_batch_axis_count',
@@ -134,7 +136,7 @@ def quantize_linear_weight(array, parameter, rule):
     )
 
 
-def quantize_embedding_weight(array, parameter, rule):
+def quantize_embedding_weight(array: Any, parameter: Any, rule: Any) -> Any:
     tiled_axes = None
     if rule.tile_size is not None:
         tiled_axes = {1: rule.tile_size}

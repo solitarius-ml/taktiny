@@ -15,7 +15,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 import grain.python as grain
@@ -52,7 +52,7 @@ class PackSequences:
         position_key: str = 'position_ids',
         overflow: str = 'split',
         drop_remainder: bool = False,
-    ):
+    ) -> None:
         if (
             isinstance(sequence_length, bool)
             or not isinstance(sequence_length, int)
@@ -104,7 +104,10 @@ class PackSequences:
         self.overflow = overflow
         self.drop_remainder = drop_remainder
 
-    def _normalize_record(self, value):
+    def _normalize_record(
+        self,
+        value: Mapping[str, Any],
+    ) -> tuple[dict[str, np.ndarray], int]:
         if not isinstance(value, Mapping):
             raise TypeError('PackSequences expects mapping records')
 
@@ -131,11 +134,11 @@ class PackSequences:
 
     def _finish_pack(
         self,
-        values,
-        position_ids,
+        values: Mapping[str, Sequence[np.ndarray]],
+        position_ids: Sequence[int],
         *,
-        drop_incomplete,
-    ):
+        drop_incomplete: bool,
+    ) -> dict[str, np.ndarray] | None:
         valid_length = len(position_ids)
         if valid_length == 0:
             return None
@@ -160,13 +163,16 @@ class PackSequences:
         )
         return packed
 
-    def __call__(self, input_iterator: Iterable[grain.Record]):
+    def __call__(
+        self,
+        input_iterator: Iterable[grain.Record],
+    ) -> Iterator[grain.Record]:
         values = {key: [] for key in self.sequence_keys}
         position_ids = []
         metadata = None
         pack_metadata = None
 
-        def reset():
+        def reset() -> None:
             nonlocal values, position_ids, pack_metadata
             values = {key: [] for key in self.sequence_keys}
             position_ids = []
@@ -250,7 +256,7 @@ class CausalLMBatch(grain.MapTransform):
         labels_key: str = 'labels',
         position_key: str = 'position_ids',
         ignore_index: int = -100,
-    ):
+    ) -> None:
         for name, key in (
             ('labels_key', labels_key),
             ('position_key', position_key),
@@ -265,7 +271,7 @@ class CausalLMBatch(grain.MapTransform):
         self.position_key = position_key
         self.ignore_index = ignore_index
 
-    def map(self, batch):
+    def map(self, batch: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(batch, Mapping):
             raise TypeError('CausalLMBatch expects a mapping batch')
         for key in (self.labels_key, self.position_key):
@@ -302,13 +308,13 @@ class ApplyTemplate(grain.MapTransform):
 
     def __init__(
         self,
-        template,
+        template: Any,
         format_fn: Callable[[Any], Any] | None = None,
         column: str = 'template',
-    ):
+    ) -> None:
         if format_fn is not None and not callable(format_fn):
             raise TypeError('format_fn must be callable or None')
-        
+
         if not isinstance(column, str) or not column:
             raise TypeError('column must be a non-empty string')
 
@@ -318,25 +324,25 @@ class ApplyTemplate(grain.MapTransform):
         self.format_fn = format_fn
 
     @classmethod
-    def _format(cls, template, element):
+    def _format(cls, template: Any, element: Mapping[str, Any]) -> Any:
         if isinstance(template, str):
             return template.format_map(element)
-        
+
         if isinstance(template, Mapping):
             return {
                 key: cls._format(value, element)
                 for key, value in template.items()
             }
-        
+
         if isinstance(template, list):
             return [cls._format(value, element) for value in template]
-        
+
         if isinstance(template, tuple):
             return tuple(cls._format(value, element) for value in template)
-        
+
         return template
 
-    def map(self, element):
+    def map(self, element: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(element, Mapping):
             raise TypeError('ApplyTemplate expects mapping records')
 

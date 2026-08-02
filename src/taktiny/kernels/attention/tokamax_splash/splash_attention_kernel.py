@@ -16,6 +16,8 @@
 # ==============================================================================
 
 """Implementation of Sparse Flash Attention, a.k.a. "Splash" attention."""
+from __future__ import annotations
+
 
 from collections.abc import Callable
 import dataclasses
@@ -99,7 +101,7 @@ class QKVLayout(enum.IntEnum):
   SEQ_MINOR = enum.auto()  # [..., head_dim, seq_len]
 
 
-def from_head_minor(vals: tuple[Any, ...], layout: QKVLayout):
+def from_head_minor(vals: tuple[Any, ...], layout: QKVLayout) -> Any:
   if layout == QKVLayout.HEAD_DIM_MINOR:
     return vals
   return (*vals[:-2], vals[-1], vals[-2])
@@ -151,7 +153,7 @@ class SplashConfig:
   # An experimental scheduler that sometimes produces better softmax overlap.
   use_experimental_scheduler: bool = False
 
-  def __post_init__(self):
+  def __post_init__(self) -> None:
     if self.block_kv_compute is None:
       object.__setattr__(self, "block_kv_compute", self.block_kv)
     if self.block_kv_dkv_compute is None:
@@ -172,7 +174,7 @@ class SplashConfig:
     return all(b is not None for b in backward_blocks)
 
   @classmethod
-  def get_default(cls):
+  def get_default(cls) -> Any:
     # TODO: Select better parameters based on a heuristic.
     return SplashConfig(
         block_q=128,
@@ -193,18 +195,18 @@ to_i32 = lambda x: x.astype(jnp.int32)
 def _apply_mask_and_soft_cap(
     qk: jax.Array,
     mask_value: float,
-    mask_ref,
-    q_sequence_ref,
-    kv_sequence_ref,
-    q_segment_ids_ref,
-    kv_segment_ids_ref,
+    mask_ref: Any,
+    q_sequence_ref: Any,
+    kv_sequence_ref: Any,
+    q_segment_ids_ref: Any,
+    kv_segment_ids_ref: Any,
     *,
     attn_logits_soft_cap: float | None,
     k_slice: pl.Slice,
     k_offset: int | jax.Array,
     bq: int,
-    k_in_lanes=True,
-    mask_function=None,
+    k_in_lanes: bool=True,
+    mask_function: Any=None,
     has_partial_mask: bool = False,
 ) -> tuple[jax.Array, jax.Array | None]:
   assert mask_ref is None or q_sequence_ref is None
@@ -266,7 +268,7 @@ def _apply_mask_and_soft_cap(
       q_ids = q_segment_ids_ref[:1, :]  # [1, bq]
     masks.append(q_ids == kv_ids)
 
-  def cap_logits(logits):
+  def cap_logits(logits: Any) -> Any:
     if attn_logits_soft_cap is not None:
       logits = jnp.tanh(logits / attn_logits_soft_cap)
       return logits * attn_logits_soft_cap
@@ -285,32 +287,32 @@ def _apply_mask_and_soft_cap(
 
 def flash_attention_kernel(
     # Prefetched inputs
-    active_rows_ref,
-    active_cols_ref,
-    mask_next_ref,
-    bounds_start_ref,
-    bounds_end_ref,
-    block_mask_ref,
+    active_rows_ref: Any,
+    active_cols_ref: Any,
+    mask_next_ref: Any,
+    bounds_start_ref: Any,
+    bounds_end_ref: Any,
+    block_mask_ref: Any,
     # Inputs
-    q_ref,
-    k_ref,
-    v_ref,
-    q_segment_ids_ref,
-    kv_segment_ids_ref,
-    sinks_ref,
-    mask_ref,
-    q_sequence_ref,
-    kv_sequence_ref,
-    max_logit_value_ref,
+    q_ref: Any,
+    k_ref: Any,
+    v_ref: Any,
+    q_segment_ids_ref: Any,
+    kv_segment_ids_ref: Any,
+    sinks_ref: Any,
+    mask_ref: Any,
+    q_sequence_ref: Any,
+    kv_sequence_ref: Any,
+    max_logit_value_ref: Any,
     # Outputs
-    o_ref,
-    logsumexp_ref,
-    l_linear_ref,
-    max_logits_ref,
+    o_ref: Any,
+    logsumexp_ref: Any,
+    l_linear_ref: Any,
+    max_logits_ref: Any,
     # Scratch
-    m_scratch_ref,
-    l_scratch_ref,
-    o_scratch_ref,
+    m_scratch_ref: Any,
+    l_scratch_ref: Any,
+    o_scratch_ref: Any,
     *,
     mask_value: float,
     kv_steps: int,
@@ -321,7 +323,7 @@ def flash_attention_kernel(
     mask_function: MaskFunctionType | None,
     fuse_reciprocal: bool,  # config.fuse_reciprocal or not save_residuals
     config: SplashConfig,
-):
+) -> None:
   del mask_next_ref, active_rows_ref
   float32 = jnp.float32
   HEAD_DIM_MINOR = QKVLayout.HEAD_DIM_MINOR
@@ -358,7 +360,7 @@ def flash_attention_kernel(
     max_logit_estimate *= LOG2E
 
   @pl.when(should_initialize)
-  def init():
+  def init() -> None:
     o_scratch_ref[...] = jnp.zeros_like(o_scratch_ref)
 
     sink = None
@@ -381,7 +383,7 @@ def flash_attention_kernel(
       m_scratch_ref[...] = jnp.full_like(m_scratch_ref, max_logit_estimate)
       l_scratch_ref[...] = exp(sink - jnp.full_like(l_scratch_ref, max_logit_estimate))
 
-  def body(kv_compute_index, _, has_partial_mask=False):
+  def body(kv_compute_index: int, _: Any, has_partial_mask: bool=False) -> None:
     slice_k = pl.ds(kv_compute_index * bkv_compute, bkv_compute)
     m_prev, l_prev = m_scratch_ref[...], l_scratch_ref[...]
     assert m_prev.shape == (bq, NUM_LANES)
@@ -468,15 +470,15 @@ def flash_attention_kernel(
   num_iters = k_ref.shape[0 if config.k_layout == HEAD_DIM_MINOR else 1] // bkv_compute
 
   @pl.when(jnp.logical_and(should_not_mask, should_run))
-  def _():
+  def _() -> None:
     lax.fori_loop(0, num_iters, body, None, unroll=True)
 
   @pl.when(jnp.logical_and(_not(should_not_mask), should_run))
-  def _():
+  def _() -> None:
     lax.fori_loop(0, num_iters, partial(body, has_partial_mask=True), None, unroll=True)
 
   @pl.when(should_write)
-  def end():
+  def end() -> None:
     l = l_scratch_ref[...]
     m = m_scratch_ref[...]
     safe_l = jnp.where(l == 0.0, 1.0, l)
@@ -499,7 +501,7 @@ def flash_attention_kernel(
       max_logits_ref[...] = m.astype(max_logits_ref.dtype)
 
 
-def _div(dividend: int, divisor: int):
+def _div(dividend: int, divisor: int) -> Any:
   if divisor == 1:
     return dividend
 
@@ -594,8 +596,8 @@ def _splash_attention_forward(
   k_layout = config.k_layout
   v_layout = config.v_layout
 
-  def unravel(f):
-    def index_map(h, grid_idx, rows_ref, cols_ref, *_):
+  def unravel(f: Any) -> Any:
+    def index_map(h: Any, grid_idx: int, rows_ref: Any, cols_ref: Any, *_: Any) -> Any:
       if dynamic_grid:
         i = to_i32(rows_ref[grid_idx])
         j = to_i32(cols_ref[grid_idx])
@@ -606,8 +608,8 @@ def _splash_attention_forward(
 
     return index_map
 
-  def create_kv_index_map(layout):
-    def index_map(h, i, j):
+  def create_kv_index_map(layout: Any) -> Any:
+    def index_map(h: Any, i: Any, j: Any) -> Any:
       del i  # Unused.
       prefix = () if is_mqa else (_div(h, q_heads_per_kv_head),)
       return from_head_minor((*prefix, j, 0), layout)
@@ -619,7 +621,7 @@ def _splash_attention_forward(
   k_index_map = unravel(create_kv_index_map(k_layout))
   v_index_map = unravel(create_kv_index_map(v_layout))
 
-  def mask_index_map(h, grid_idx, rows_ref, cols_ref, mask_next_ref=None, *_):
+  def mask_index_map(h: Any, grid_idx: int, rows_ref: Any, cols_ref: Any, mask_next_ref: Any=None, *_: Any) -> tuple[Any, ...]:
     del h, rows_ref, cols_ref  # Unused.
     next_m = to_i32(mask_next_ref[grid_idx])
     return next_m, 0, 0
@@ -999,27 +1001,27 @@ def _splash_attention_fwd(
 
 def _flash_attention_dq_kernel(
     # Prefetched inputs
-    active_rows_ref,
-    active_cols_ref,
-    mask_next_ref,
-    bounds_start_ref,
-    bounds_end_ref,
-    block_mask_ref,
+    active_rows_ref: Any,
+    active_cols_ref: Any,
+    mask_next_ref: Any,
+    bounds_start_ref: Any,
+    bounds_end_ref: Any,
+    block_mask_ref: Any,
     # Inputs
-    q_ref,
-    k_ref,
-    v_ref,
-    q_segment_ids_ref,
-    kv_segment_ids_ref,
-    logsumexp_ref,
-    do_ref,
-    di_ref,
-    mask_ref,
-    q_sequence_ref,
-    kv_sequence_ref,
+    q_ref: Any,
+    k_ref: Any,
+    v_ref: Any,
+    q_segment_ids_ref: Any,
+    kv_segment_ids_ref: Any,
+    logsumexp_ref: Any,
+    do_ref: Any,
+    di_ref: Any,
+    mask_ref: Any,
+    q_sequence_ref: Any,
+    kv_sequence_ref: Any,
     # Outputs
-    dq_scratch_ref,
-    dq_ref,
+    dq_scratch_ref: Any,
+    dq_ref: Any,
     *,
     mask_value: float,
     kv_steps: int,
@@ -1027,7 +1029,7 @@ def _flash_attention_dq_kernel(
     bkv: int,
     mask_function: MaskFunctionType | None,
     config: SplashConfig,
-):
+) -> None:
   del mask_next_ref, active_rows_ref
   float32 = jnp.float32
   HEAD_DIM_MINOR = QKVLayout.HEAD_DIM_MINOR
@@ -1048,10 +1050,10 @@ def _flash_attention_dq_kernel(
     should_write = kv_index == kv_steps - 1
 
   @pl.when(should_initialize)
-  def init():
+  def init() -> None:
     dq_scratch_ref[...] = jnp.zeros_like(dq_scratch_ref)
 
-  def body(has_partial_mask: bool = False):
+  def body(has_partial_mask: bool = False) -> None:
     q = q_ref[...] if config.q_layout == HEAD_DIM_MINOR else q_ref[...].T
     if config.use_base2_exp:
       q *= LOG2E
@@ -1106,50 +1108,50 @@ def _flash_attention_dq_kernel(
     )
 
   @pl.when(should_not_mask)
-  def _():
+  def _() -> None:
     body()
 
   @pl.when(jnp.logical_not(should_not_mask))
-  def _():
+  def _() -> None:
     body(has_partial_mask=True)
 
   @pl.when(should_write)
-  def end():
+  def end() -> None:
     dq_ref[...] = dq_scratch_ref[...].astype(dq_ref.dtype)
 
 
 def _flash_attention_dkv_kernel(
     # Prefetched inputs
-    active_rows_ref,
-    active_cols_ref,
-    mask_next_ref,
-    bounds_start_ref,
-    bounds_end_ref,
-    block_mask_ref,
+    active_rows_ref: Any,
+    active_cols_ref: Any,
+    mask_next_ref: Any,
+    bounds_start_ref: Any,
+    bounds_end_ref: Any,
+    block_mask_ref: Any,
     # Inputs
-    q_ref,
-    k_ref,
-    v_ref,
-    q_segment_ids_ref,
-    kv_segment_ids_ref,
-    logsumexp_ref,
-    do_ref,
-    di_ref,
-    mask_ref,
-    q_sequence_ref,
-    kv_sequence_ref,
+    q_ref: Any,
+    k_ref: Any,
+    v_ref: Any,
+    q_segment_ids_ref: Any,
+    kv_segment_ids_ref: Any,
+    logsumexp_ref: Any,
+    do_ref: Any,
+    di_ref: Any,
+    mask_ref: Any,
+    q_sequence_ref: Any,
+    kv_sequence_ref: Any,
     # aliases
-    dq_alias,
-    dk_alias,
-    dv_alias,
+    dq_alias: Any,
+    dk_alias: Any,
+    dv_alias: Any,
     # Outputs
-    dq_ref,
-    dk_ref,
-    dv_ref,
+    dq_ref: Any,
+    dk_ref: Any,
+    dv_ref: Any,
     # Scratch
-    dq_scratch_ref,
-    dk_scratch_ref,
-    dv_scratch_ref,
+    dq_scratch_ref: Any,
+    dk_scratch_ref: Any,
+    dv_scratch_ref: Any,
     *,
     mask_value: float,
     q_steps: int,
@@ -1159,7 +1161,7 @@ def _flash_attention_dkv_kernel(
     mask_function: MaskFunctionType | None,
     q_heads_per_kv_head: int,
     config: SplashConfig,
-):
+) -> None:
   del mask_next_ref, active_cols_ref
   HEAD_DIM_MINOR = QKVLayout.HEAD_DIM_MINOR
   attn_logits_soft_cap = config.attn_logits_soft_cap
@@ -1203,11 +1205,11 @@ def _flash_attention_dkv_kernel(
   # Q_heads to 'see' the current KV_head).
 
   @pl.when(should_initialize)
-  def init():
+  def init() -> None:
     dk_scratch_ref[...] = jnp.zeros_like(dk_scratch_ref)
     dv_scratch_ref[...] = jnp.zeros_like(dv_scratch_ref)
 
-  def body(i, _, has_partial_mask=False):
+  def body(i: Any, _: Any, has_partial_mask: bool=False) -> None:
 
     slice_k = pl.ds(i * bkv_compute, bkv_compute)
     q = q_ref[...]  # We keep q potentially transposed, since it's always RHS
@@ -1216,7 +1218,7 @@ def _flash_attention_dkv_kernel(
     else:
       scaled_q = q
 
-    def _load_kv(ref, layout):
+    def _load_kv(ref: Any, layout: Any) -> Any:
       if layout == HEAD_DIM_MINOR:
         return ref[slice_k, :]
       return ref[:, slice_k].T
@@ -1296,11 +1298,11 @@ def _flash_attention_dkv_kernel(
   num_iters = k_ref.shape[0 if config.k_layout is HEAD_DIM_MINOR else 1] // bkv_compute
 
   @pl.when(jnp.logical_and(should_not_mask, should_run))
-  def _():
+  def _() -> None:
     lax.fori_loop(0, num_iters, body, None, unroll=True)
 
   @pl.when(jnp.logical_and(_not(should_not_mask), should_run))
-  def _():
+  def _() -> None:
     lax.fori_loop(0, num_iters, partial(body, has_partial_mask=True), None, unroll=True)
 
   if dq_scratch_ref is not None:
@@ -1313,7 +1315,7 @@ def _flash_attention_dkv_kernel(
     assert dv_alias is None
 
     @pl.when(should_write)
-    def _():
+    def _() -> None:
       dk_ref[...] = dk_scratch_ref[...].astype(dk_ref.dtype)
       dv_ref[...] = dv_scratch_ref[...].astype(dv_ref.dtype)
 
@@ -1322,24 +1324,24 @@ def _flash_attention_dkv_kernel(
     first_q_head_in_kv_group = lax.rem(q_head, q_heads_per_kv_head) == 0
 
     @pl.when(jnp.logical_and(should_write, first_q_head_in_kv_group))
-    def _():
+    def _() -> None:
       dk_ref[...] = dk_scratch_ref[...].astype(dk_ref.dtype)
       dv_ref[...] = dv_scratch_ref[...].astype(dv_ref.dtype)
 
     @pl.when(jnp.logical_and(should_write, _not(first_q_head_in_kv_group)))
-    def _():
+    def _() -> None:
       dk_ref[...] = dk_alias[...] + dk_scratch_ref[...].astype(dk_ref.dtype)
       dv_ref[...] = dv_alias[...] + dv_scratch_ref[...].astype(dv_ref.dtype)
 
 
 def _splash_attention_bwd_dkv(
-    q,
-    k,
-    v,
-    segment_ids,
-    logsumexp,
-    do,
-    di,
+    q: Any,
+    k: Any,
+    v: Any,
+    segment_ids: Any,
+    logsumexp: Any,
+    do: Any,
+    di: Any,
     *,
     bq: int,
     bkv: int,
@@ -1351,7 +1353,7 @@ def _splash_attention_bwd_dkv(
     config: SplashConfig,
     dkv_mask_sparsity: float,
     return_fp32_grads: bool = False,
-):
+) -> tuple[Any, ...]:
   num_q_heads, q_seq_len, head_dim_qk = q.shape
   kv_seq_len, head_dim_v = v.shape[-2:]
   num_kv_heads = 1 if is_mqa else k.shape[0]
@@ -1382,8 +1384,8 @@ def _splash_attention_bwd_dkv(
 
   if dynamic_grid:
 
-    def unravel(f):
-      def index_map(h, grid_idx, rows_ref, cols_ref, *_):
+    def unravel(f: Any) -> Any:
+      def index_map(h: Any, grid_idx: int, rows_ref: Any, cols_ref: Any, *_: Any) -> Any:
         j = to_i32(rows_ref[grid_idx])
         i = to_i32(cols_ref[grid_idx])
         return f(h, i, j)
@@ -1393,7 +1395,7 @@ def _splash_attention_bwd_dkv(
     grid_size = mask_info.num_active_blocks[0]
     grid = (num_q_heads, grid_size)
 
-    def mask_index_map(h, grid_idx, rows_ref, cols_ref, mask_next_ref=None, *_):
+    def mask_index_map(h: Any, grid_idx: int, rows_ref: Any, cols_ref: Any, mask_next_ref: Any=None, *_: Any) -> tuple[Any, ...]:
       del h, rows_ref, cols_ref  # Unused.
       next_m = to_i32(mask_next_ref[grid_idx])
       return next_m, 0, 0
@@ -1402,7 +1404,7 @@ def _splash_attention_bwd_dkv(
     unravel = lambda f: lambda j, h, i, *_: f(h, i, j)
     grid = (kv_steps, num_q_heads, q_steps)
 
-    def mask_index_map(j, h, i, rows_ref, cols_ref, mask_next_ref=None, *_):
+    def mask_index_map(j: Any, h: Any, i: Any, rows_ref: Any, cols_ref: Any, mask_next_ref: Any=None, *_: Any) -> tuple[Any, ...]:
       del h, rows_ref, cols_ref  # Unused.
       grid_idx = j * q_steps + i
       next_m = to_i32(mask_next_ref[grid_idx])
@@ -1411,8 +1413,8 @@ def _splash_attention_bwd_dkv(
   q_index_map = unravel(lambda h, i, j: from_head_minor((h, i, 0), config.q_layout))
   o_index_map = unravel(lambda h, i, j: (h, i, 0))
 
-  def create_kv_index_map(layout):
-    def index_map(h, i, j, *_):
+  def create_kv_index_map(layout: Any) -> Any:
+    def index_map(h: Any, i: Any, j: Any, *_: Any) -> Any:
       del i  # Unused.
       prefix = () if is_mqa else (_div(h, q_heads_per_kv_head),)
       return from_head_minor((*prefix, j, 0), layout)
@@ -1441,7 +1443,7 @@ def _splash_attention_bwd_dkv(
       v_index_map,
   )
 
-  def create_dkv_index_map(h, i, j, *_):
+  def create_dkv_index_map(h: Any, i: Any, j: Any, *_: Any) -> tuple[Any, ...]:
     del i  # Unused.
     prefix = () if is_mqa else (_div(h, q_heads_per_kv_head),)
     return (*prefix, j, 0)
@@ -1873,13 +1875,13 @@ class SplashAttentionKernel:
       self,
       fwd_mask_info: MaskInfo,
       dkv_mask_info: MaskInfo | None,
-      **kwargs,
-  ):
+      **kwargs: Any,
+  ) -> None:
     self.kwargs = kwargs
     self.fwd_mask_info = fwd_mask_info
     self.dkv_mask_info = dkv_mask_info
 
-  def __call__(self, *args, **kwargs) -> base.SplashCustomReturnType:
+  def __call__(self, *args: Any, **kwargs: Any) -> base.SplashCustomReturnType:
     return _splash_attention(
         self.fwd_mask_info,
         self.dkv_mask_info,
@@ -1887,7 +1889,7 @@ class SplashAttentionKernel:
         **dict(self.kwargs, **kwargs),
     )
 
-  def manual_sharding_spec(self, sharding: jax.sharding.NamedSharding):
+  def manual_sharding_spec(self, sharding: jax.sharding.NamedSharding) -> Any:
     """Returns a value that can be used as a shard_map partition spec for the kernel."""
     if self.fwd_mask_info.block_mask is not None:
       block_mask_shape = self.fwd_mask_info.block_mask.shape
@@ -1901,7 +1903,7 @@ class SplashAttentionKernel:
 
     _resolve_spec = lambda x: sharding.spec if x is not None else None
 
-    def mask_info_spec(mask_info):
+    def mask_info_spec(mask_info: Any) -> Any:
       if mask_info is None:
         return None
       return MaskInfo(  # pytype: disable=wrong-arg-types
@@ -1923,11 +1925,11 @@ class SplashAttentionKernel:
         **self.kwargs,
     )
 
-  def tree_flatten(self):
+  def tree_flatten(self) -> tuple[Any, ...]:
     return ((self.fwd_mask_info, self.dkv_mask_info), self.kwargs)
 
   @classmethod
-  def tree_unflatten(cls, kwargs, values):
+  def tree_unflatten(cls, kwargs: Any, values: Any) -> Any:
     fwd_mask_info, dkv_mask_info = values
     # NamedTuples are not preserved during pytree serialization.
     dkv_mask_info = MaskInfo(*dkv_mask_info) if dkv_mask_info is not None else None
@@ -1944,7 +1946,7 @@ def _make_splash_attention(
     downcast_smem_data: bool = True,
     partial_mask_blocks_dtype: jax.typing.DTypeLike = np.int8,
     q_seq_shards: int,
-):
+) -> Any:
   if len(mask.shape) != 2:
     raise ValueError(f"Unexpected mask shape: {mask.shape}")
 
@@ -2009,7 +2011,7 @@ def _make_dynamic_splash_attention(
     mask_value: float = base.DEFAULT_MASK_VALUE,
     downcast_smem_data: bool = True,
     partial_mask_blocks_dtype: jax.typing.DTypeLike = np.int8,
-):
+) -> Any:
   if (mesh is not None) != (mask_spec is not None):
     raise ValueError("Either both or neither of mesh and mask_spec must be specified.")
 
@@ -2025,7 +2027,7 @@ def _make_dynamic_splash_attention(
   # This is the only mode that supports the dynamic grid.
   config = dataclasses.replace(config, dq_reduction_steps=3)
 
-  def process_mask_shard(mask):
+  def process_mask_shard(mask: Any) -> tuple[Any, ...]:
     process_mask_fn = functools.partial(
         mask_info_lib._process_dynamic_mask,
         downcast_smem_data=downcast_smem_data,
@@ -2078,7 +2080,7 @@ def _make_dynamic_splash_attention(
       out_specs=out_specs,
       check_vma=False,
   )
-  def process_all_shards(mask):
+  def process_all_shards(mask: Any) -> Any:
     return process_mask_shard(mask)
 
   fwd_mask_info, dkv_mask_info = process_all_shards(mask)

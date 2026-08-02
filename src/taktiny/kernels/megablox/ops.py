@@ -14,6 +14,10 @@
 # limitations under the License.
 
 """Grouped matrix multiplication operations with custom VJPs."""
+from __future__ import annotations
+
+from typing import Any
+
 
 # pylint: disable=too-many-positional-arguments
 
@@ -79,7 +83,7 @@ def gmm(
     use_manual_quantization: bool = False,  # used in batchsplit
     use_gmm_v2: bool = False,
     partial_sum: jnp.ndarray | None = None,
-):
+) -> Any:
   """Grouped matrix multiplication operation."""
   if interpret is None:
     # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:

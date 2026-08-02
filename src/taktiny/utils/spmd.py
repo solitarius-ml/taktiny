@@ -24,6 +24,10 @@ Additionally the ``LogicallyPartitioned`` metadata wrapper is defined as
 well as the initializer function wrapper ``with_logical_partitioning``for
 introducing logical axis metadata into a model's variables.
 """
+from __future__ import annotations
+
+from typing import Any
+
 
 from taktiny.utils.typing import LogicalRules
 from typing import Sequence
@@ -36,10 +40,10 @@ import dataclasses
 class _UnassignedAxis:
   """Sentinel class for unassigned logical axis name."""
 
-  def __repr__(self):
+  def __repr__(self) -> str:
     return 'UnassignedAxis'
 
-  def __bool__(self):
+  def __bool__(self) -> bool:
     return False
 
 _unassigned_axis = _UnassignedAxis()
@@ -53,7 +57,7 @@ class _AxisRules(threading.local):
 # Global axis binding context.
 _axis_rules = _AxisRules()
 
-def _mesh_assignment_free(new_assignment, existing_assignments):
+def _mesh_assignment_free(new_assignment: Any, existing_assignments: Any) -> bool:
   """Determines if a given mesh axis has already been assigned."""
   new = set(jax.tree_util.tree_leaves(new_assignment))
   existing = set(jax.tree_util.tree_leaves(existing_assignments))

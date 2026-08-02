@@ -17,6 +17,8 @@
 # https://github.com/openxla/tokamax/blob/3f332fcf85dcb87aab661d00228ed71a09b5fd56/
 # tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
 """GMM kernel implemented using Pallas."""
+from __future__ import annotations
+
 
 from abc import ABC, abstractmethod
 import dataclasses
@@ -41,7 +43,7 @@ def swigluoai(gate: jax.Array, up: jax.Array, *, alpha: float = 1.702, limit: fl
   return (up + 1.0) * glu
 
 
-def apply_act_fn(acc: jax.Array, fuse_act: str | None):
+def apply_act_fn(acc: jax.Array, fuse_act: str | None) -> Any:
   """Applies a fused activation function to the accumulator.
 
   This function is used when an activation function is fused with the matrix
@@ -75,7 +77,7 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
       raise NotImplementedError(f"Unsupported activation function: {fuse_act}")
 
 
-def align_to(x, a):
+def align_to(x: Any, a: Any) -> Any:
   return pl.cdiv(x, a) * a
 
 
@@ -227,11 +229,11 @@ TileFn = Callable[[Dimensions, InputConfigs, InputConfigs, int | None, str | Non
 class IndexMaps:
   """Index maps for GMM kernel."""
 
-  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs):
+  def __init__(self, metadata_ref: MetadataRef, cfgs: GmmConfigs) -> None:
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
 
-  def lhs_index_map(self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array):
+  def lhs_index_map(self, _: jax.Array, gm_id: jax.Array, k_id: jax.Array) -> tuple[Any, ...]:
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -241,15 +243,15 @@ class IndexMaps:
 
     return (pl.ds(row_start, row_size), 0, k_id)
 
-  def rhs_weight_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array):
+  def rhs_weight_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array) -> tuple[Any, ...]:
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     return (group_id, k_id, n_id)
 
-  def rhs_bias_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
+  def rhs_bias_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array) -> tuple[Any, ...]:
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     return (group_id, 0, n_id)
 
-  def rhs_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array):
+  def rhs_scale_index_map(self, n_id: jax.Array, gm_id: jax.Array, k_id: jax.Array) -> tuple[Any, ...]:
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     # Simply multiplying k_id by num_quant_blocks_per_tile_k will not work
     # since a single quant block could be shared along multiple k tile.
@@ -258,7 +260,7 @@ class IndexMaps:
     b_tile_id = b_row // self.cfgs.num_quant_blocks_per_tile_k
     return (group_id, b_tile_id, 0, n_id)
 
-  def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
+  def out_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array) -> tuple[Any, ...]:
     """Calculates index map for the output tensor."""
     is_last_gm = gm_id == (pl.num_programs(1) - 1)
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
@@ -272,7 +274,7 @@ class IndexMaps:
 
     return (pl.ds(row_start, row_size), 0, n_id)
 
-  def ps_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array):
+  def ps_index_map(self, n_id: jax.Array, gm_id: jax.Array, _: jax.Array) -> tuple[Any, ...]:
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = self.metadata_ref.gm_id_to_m_offset[gm_id + 1]
 
@@ -358,7 +360,7 @@ def inner_kernel(
     metadata_ref: MetadataRef,
     *,
     cfgs: GmmConfigs,
-):
+) -> None:
   """Inner kernel invoked by emit_pipeline to perform matmul.
 
   tiled_lhs_ref and tiled_out_ref points to rows [m_start:m_end] of lhs and out.
@@ -379,7 +381,7 @@ def inner_kernel(
     cfgs: GmmConfigs.
   """
 
-  def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+  def _matmul(is_first_k_step: bool, is_last_k_step: bool) -> None:
     tpu_info = pltpu.get_tpu_info()
     mxu_size = tpu_info.mxu_column_size
 
@@ -562,19 +564,19 @@ def inner_kernel(
 
   # Define matmul wrapper functions.
   @jax.named_scope("matmul_first_last")
-  def matmul_first_last():
+  def matmul_first_last() -> None:
     _matmul(is_first_k_step=True, is_last_k_step=True)
 
   @jax.named_scope("matmul_first")
-  def matmul_first():
+  def matmul_first() -> None:
     _matmul(is_first_k_step=True, is_last_k_step=False)
 
   @jax.named_scope("matmul")
-  def matmul():
+  def matmul() -> None:
     _matmul(is_first_k_step=False, is_last_k_step=False)
 
   @jax.named_scope("matmul_last")
-  def matmul_last():
+  def matmul_last() -> None:
     _matmul(is_first_k_step=False, is_last_k_step=True)
 
   # Select and execute matmul function based on the current step.
@@ -629,7 +631,7 @@ def fill_metadata(
   metadata_ref.gm_id_to_m_offset[0] = 0
 
   @jax.named_scope("inner_tm_loop")
-  def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id):
+  def inner_tm_loop(tm_id: Any, curr_m_offset: Any, *, end_m_offset: Any, group_id: Any) -> Any:
     local_offset = curr_m_offset % cfgs.dims.size_lhs_sublane
     tm_size = jnp.minimum(cfgs.tiles.tile_m - local_offset, end_m_offset - curr_m_offset)
 
@@ -642,7 +644,7 @@ def fill_metadata(
     return next_m_offset
 
   @jax.named_scope("outer_group_loop")
-  def outer_group_loop(lhs_group_id, carry):
+  def outer_group_loop(lhs_group_id: Any, carry: Any) -> tuple[Any, ...]:
     num_gm, start_m_offset = carry
 
     group_id = lhs_group_id - group_offset
@@ -695,7 +697,7 @@ def zero_out_start(
     num_gm: jax.Array,
     *,
     dims: Dimensions,
-):
+) -> Any:
   """Zero out output rows that are not used in the computation."""
 
   num_lanes = pltpu.get_tpu_info().num_lanes
@@ -719,7 +721,7 @@ def zero_out_start(
   right_zero_size = right_zero_end - right_zero_start
   right_num_loops = pl.cdiv(right_zero_size, row_size)
 
-  def fill_zero(i, zero_size, *, start, end):
+  def fill_zero(i: Any, zero_size: int, *, start: Any, end: Any) -> Any:
     dma_start = start + i * row_size
     dma_end = jnp.minimum(dma_start + row_size, end)
     dma_size = dma_end - dma_start
@@ -736,11 +738,11 @@ def zero_out_start(
     return zero_size + dma_size
 
   @jax.named_scope("left_fill_zero")
-  def left_fill_zero(i, zero_size):
+  def left_fill_zero(i: Any, zero_size: int) -> Any:
     return fill_zero(i, zero_size, start=left_zero_start, end=left_zero_end)
 
   @jax.named_scope("right_fill_zero")
-  def right_fill_zero(i, zero_size):
+  def right_fill_zero(i: Any, zero_size: int) -> Any:
     return fill_zero(i, zero_size, start=right_zero_start, end=right_zero_end)
 
   zero_size = lax.fori_loop(0, left_num_loops, left_fill_zero, 0)
@@ -754,7 +756,7 @@ def zero_out_end(
     zero_size: jax.Array,
     *,
     dims: Dimensions,
-):
+) -> None:
   out_dma = out_ref.reshape(-1, dims.size_lhs_sublane, out_ref.shape[-1])
   pltpu.make_async_copy(
       src_ref=out_dma.at[pl.ds(0, zero_size)],
@@ -781,7 +783,7 @@ def kernel_main(
     semaphore_ref: jax.Array | None,  # [1]
     *,
     cfgs: GmmConfigs,
-):
+) -> None:
   """Entry point for GMM kernel.
 
   Computes metadata to determine which rows of lhs needs processing and how
@@ -1032,7 +1034,7 @@ def validate_inputs(
   )
 
 
-def get_cost_estimate(cfgs: GmmConfigs):
+def get_cost_estimate(cfgs: GmmConfigs) -> Any:
   """Returns the cost estimate for the GMM kernel."""
 
   dims = cfgs.dims
@@ -1092,7 +1094,7 @@ def make_gmm_configs(
     maybe_quantize_lhs: bool,
     zero_initialize: bool,
     fuse_act: str | None = None,
-):
+) -> Any:
   """Fills the GMM config for the GMM kernel."""
 
   dims = validate_inputs(lhs, rhs, rhs_scale, rhs_bias, partial_sum, group_sizes, group_offset, fuse_act)

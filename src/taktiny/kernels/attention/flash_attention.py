@@ -13,6 +13,10 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """JAX implementation without using Pallas for Flash Attention."""
+from __future__ import annotations
+
+from typing import Any
+
 
 from typing import Optional, Tuple, Union
 
@@ -133,13 +137,13 @@ def flash_attention_block_masked(
   )
 
   # Outer loop over the key/value blocks.
-  def outer_loop_body(j, carried):
+  def outer_loop_body(j: Any, carried: Any) -> tuple[Any, ...]:
     output, l, m = carried
     k_j_slice = jax.lax.dynamic_slice_in_dim(k, j * block_kv, block_kv, axis=-2)
     v_j_slice = jax.lax.dynamic_slice_in_dim(v, j * block_kv, block_kv, axis=-2)
 
     # Inner loop over the query blocks.
-    def inner_loop_body(i, carried_inner):
+    def inner_loop_body(i: Any, carried_inner: Any) -> tuple[Any, ...]:
       output, l, m = carried_inner
 
       # let's get the slice of Q in N dimension
@@ -147,7 +151,7 @@ def flash_attention_block_masked(
 
       # Calculates the attention computation (Q@K.T)@V with online softmax for
       # the current query and key/value blocks.
-      def compute_attention_block(output, l, m):
+      def compute_attention_block(output: Any, l: Any, m: Any) -> tuple[Any, ...]:
         output_i_slice = jax.lax.dynamic_slice_in_dim(output, i * block_q, block_q, axis=-2)
         l_i_slice = jax.lax.dynamic_slice_in_dim(l, i * block_q, block_q, axis=-1)
         m_i_slice = jax.lax.dynamic_slice_in_dim(m, i * block_q, block_q, axis=-1)
@@ -196,7 +200,7 @@ def flash_attention_block_masked(
         m = jax.lax.dynamic_update_index_in_dim(m, m_i_new, i * block_q, axis=-1)
         return output, l, m
 
-      def identity(output, l, m):
+      def identity(output: Any, l: Any, m: Any) -> tuple[Any, ...]:
         """A no-op identity function."""
 
         return output, l, m

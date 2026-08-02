@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from __future__ import annotations
+from typing import Any
+
 
 from pathlib import Path
 from huggingface_hub import hf_hub_download
@@ -20,13 +22,13 @@ import json
 
 
 class ModelConfig:
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: Any) -> None:
         for k, v in kwargs.items():
             if isinstance(v, dict):
                 v = ModelConfig(**v)
             setattr(self, k, v)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         # 1. Check nested text_config (common in HuggingFace multimodal models like Gemma 3/4, Qwen VL, Llama Vision)
         text_cfg = self.__dict__.get('text_config', None)
         if text_cfg is not None and text_cfg is not self:
@@ -45,13 +47,13 @@ class ModelConfig:
         # 3. Gracefully return None for missing keys
         return None
 
-    def get(self, key, default=None):
+    def get(self, key: Any, default: Any=None) -> Any:
         """Return a configuration value using mapping-style semantics."""
         value = getattr(self, key, None)
         return default if value is None else value
 
     @classmethod
-    def load_config(cls, path_or_repo, filename='config.json', subfolder=None, local=False):
+    def load_config(cls, path_or_repo: Any, filename: str='config.json', subfolder: Any=None, local: bool=False) -> Any:
         if local:
             config_path = Path(path_or_repo).resolve()
             if subfolder:
@@ -62,11 +64,11 @@ class ModelConfig:
         else:
             try:
                 config_path = hf_hub_download(
-                    repo_id=str(path_or_repo), 
-                    subfolder=subfolder if subfolder else None, 
+                    repo_id=str(path_or_repo),
+                    subfolder=subfolder if subfolder else None,
                     filename=filename
                 )
-                
+
             except Exception as e:
                 print(f'config.json not found in repo: {e}')
                 return None
@@ -78,10 +80,10 @@ class ModelConfig:
         except Exception as e:
             print(f'Error loading config.json: {e}')
             return None
-        
+
         return cls(**config)
-    
-    def __repr__(self):
+
+    def __repr__(self) -> str:
         config_str = json.dumps(self.__dict__, indent=2, default=str)
         return f"{self.__class__.__name__} {config_str}"
 

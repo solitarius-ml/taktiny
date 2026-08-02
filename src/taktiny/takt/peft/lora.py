@@ -14,6 +14,8 @@
 """LoRA model transformation."""
 
 from __future__ import annotations
+from typing import Any
+
 
 import re
 
@@ -33,10 +35,10 @@ from taktiny.utils.quantization import (
 )
 
 
-def _lora_modules(model):
+def _lora_modules(model: Any) -> Any:
     modules = {}
 
-    def collect(module, prefix=''):
+    def collect(module: Any, prefix: str='') -> None:
         for name, child in iter_children(module):
             full_name = f'{prefix}.{name}' if prefix else name
             if isinstance(child, LoRALinear):
@@ -48,7 +50,7 @@ def _lora_modules(model):
     return modules
 
 
-def _lora_parameters(model):
+def _lora_parameters(model: Any) -> Any:
     parameters = {}
     for name, module in _lora_modules(model).items():
         parameters[f'{name}.lora_A'] = module.lora_A
@@ -57,7 +59,7 @@ def _lora_parameters(model):
 
 
 @Takt.register_peft(LoraConfig)
-def _apply_lora(model: Module, config: LoraConfig):
+def _apply_lora(model: Module, config: LoraConfig) -> Any:
     if not isinstance(model, Module):
         raise TypeError('LoRA currently requires a Taktiny nn.Module model')
 
@@ -69,7 +71,7 @@ def _apply_lora(model: Module, config: LoraConfig):
         for name, parameter in model.flat_parameter_dict().items()
     }
 
-    def transform(module, prefix=''):
+    def transform(module: Any, prefix: str='') -> None:
         for name, child in list(iter_children(module)):
             full_name = f'{prefix}.{name}' if prefix else name
             is_target = any(
@@ -132,7 +134,7 @@ def _apply_lora(model: Module, config: LoraConfig):
 
 
 @Takt.register_peft_loader('LORA')
-def _load_lora(model, config, state, *, rngs):
+def _load_lora(model: Any, config: Any, state: Any, *, rngs: Any) -> Any:
     rank = config.get('rank')
     alpha = config.get('alpha')
     target_modules = config.get('target_modules')
@@ -267,7 +269,7 @@ def _load_lora(model, config, state, *, rngs):
 
 
 @Takt.register_peft_merger(LoRALinear)
-def _merge_lora(module, *, dtype, quant, module_path):
+def _merge_lora(module: Any, *, dtype: Any, quant: Any, module_path: str) -> Any:
     base_layer = module.base_layer
     weight = getattr(base_layer, 'weight', None)
     if weight is None:

@@ -16,6 +16,8 @@
 # ==============================================================================
 
 """Mini-mask creation library."""
+from __future__ import annotations
+
 
 import collections
 import functools
@@ -173,11 +175,11 @@ class _HashableNDArray:
   __slots__ = ("array", "_hash")
   array: np.ndarray
 
-  def __init__(self, array: np.ndarray):
+  def __init__(self, array: np.ndarray) -> None:
     self.array = array
     self._hash = hash(array.tobytes())
 
-  def __hash__(self):
+  def __hash__(self) -> int:
     return self._hash
 
   def __eq__(self, other: object) -> bool:
@@ -191,7 +193,7 @@ def _generate_shard_metadata(
     partial_blocks: np.ndarray,
     is_dkv: bool,
     return_dynamic_grid: bool,
-):
+) -> tuple[Any, ...]:
   if is_dkv:
     block_mask = block_mask.mT
     partial_blocks = partial_blocks.mT

@@ -14,13 +14,15 @@
 """Module for register any model architectures"""
 
 from __future__ import annotations
+from typing import Any
+
 
 class Repertoire:
-    def __init__(self):
+    def __init__(self) -> None:
         self._repertoire = {}
         self._classes = set()
 
-    def register(self, key, cls):
+    def register(self, key: Any, cls) -> None:
         registered = self._repertoire.get(key)
         if registered is not None and registered is not cls:
             raise ValueError(
@@ -31,15 +33,15 @@ class Repertoire:
         self._classes.add(cls)
         self._repertoire[key] = cls
 
-    def available(self):
+    def available(self) -> Any:
         return list(self._repertoire.keys())
-    
-    def available_classes(self):
+
+    def available_classes(self) -> Any:
         return self._classes
-    
-    def get(self, key):
+
+    def get(self, key: Any) -> Any:
         return self._repertoire.get(key)
-    
+
 repertoire = Repertoire()
 
 __all__ = ['Repertoire', 'repertoire']

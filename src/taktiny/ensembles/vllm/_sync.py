@@ -14,6 +14,8 @@
 """Platform-specific vLLM weight synchronization."""
 
 from __future__ import annotations
+from typing import Any
+
 
 import importlib
 from typing import Protocol, runtime_checkable
@@ -34,7 +36,7 @@ class WeightSyncAdapter(Protocol):
     def configure(self, llm_options: dict) -> None:
         """Add platform-specific options before constructing ``vllm.LLM``."""
 
-    def sync(self, engine, model, *, policy_version: int, **kwargs) -> None:
+    def sync(self, engine: Any, model: Any, *, policy_version: int, **kwargs: Any) -> None:
         """Publish the current model weights to vLLM."""
 
     def close(self) -> None:
@@ -42,30 +44,30 @@ class WeightSyncAdapter(Protocol):
 
 
 class _LocalWeightSyncClient:
-    def __init__(self, llm, policy_version):
+    def __init__(self, llm: Any, policy_version: Any) -> None:
         self.llm = llm
         self.policy_version = str(policy_version)
 
-    def init_weight_transfer_engine(self, init_info):
+    def init_weight_transfer_engine(self, init_info: Any) -> None:
         self.llm.init_weight_transfer_engine({
             'init_info': init_info,
         })
 
-    def start_weight_update(self):
+    def start_weight_update(self) -> None:
         self.llm.start_weight_update()
 
-    def update_weights(self, update_info):
+    def update_weights(self, update_info: Any) -> None:
         self.llm.update_weights({
             'update_info': update_info,
         })
 
-    def finish_weight_update(self, weight_version=None):
+    def finish_weight_update(self, weight_version: Any=None) -> None:
         self.llm.finish_weight_update(
             weight_version or self.policy_version,
         )
 
 
-def _torch_from_jax(value, torch, device):
+def _torch_from_jax(value: Any, torch: Any, device: str) -> Any:
     value = jax.block_until_ready(value)
     try:
         devices = value.devices()
@@ -95,14 +97,14 @@ def _torch_from_jax(value, torch, device):
 
 
 class _JaxWeightSource:
-    def __init__(self, model, *, mapper, torch, param_meta, device):
+    def __init__(self, model: Any, *, mapper: Any, torch: Any, param_meta: Any, device: str) -> None:
         self.model = model
         self.mapper = mapper
         self.torch = torch
         self.param_meta = param_meta
         self.device = device
 
-    def __iter__(self):
+    def __iter__(self) -> Any:
         for name, value in iter_checkpoint_weights(
             self.model,
             self.mapper,
@@ -113,7 +115,7 @@ class _JaxWeightSource:
                 self.device,
             )
 
-    def metadata(self):
+    def metadata(self) -> Any:
         metadata = []
         for name, tensor in self:
             metadata.append(
@@ -135,8 +137,8 @@ class GPUWeightSync:
         mapper: WeightMapper | None = None,
         packed: bool = True,
         buffer_size: int | None = None,
-        device=None,
-    ):
+        device: str | None=None,
+    ) -> None:
         if not isinstance(packed, bool):
             raise TypeError('packed must be a boolean')
         if buffer_size is not None and buffer_size <= 0:
@@ -150,7 +152,7 @@ class GPUWeightSync:
         self._llm = None
         self._tensor_parallel_size = 1
 
-    def configure(self, llm_options):
+    def configure(self, llm_options: Any) -> None:
         self._tensor_parallel_size = int(
             llm_options.get('tensor_parallel_size', 1)
         )
@@ -176,7 +178,7 @@ class GPUWeightSync:
                 "'ipc'"
             )
 
-    def _initialize(self, engine, model, policy_version):
+    def _initialize(self, engine: Any, model: Any, policy_version: Any) -> None:
         try:
             torch = importlib.import_module('torch')
             base = importlib.import_module(
@@ -218,7 +220,7 @@ class GPUWeightSync:
         self._source = source
         self._llm = engine.llm
 
-    def sync(self, engine, model, *, policy_version, **kwargs):
+    def sync(self, engine: Any, model: Any, *, policy_version: Any, **kwargs: Any) -> None:
         if kwargs:
             names = ', '.join(sorted(kwargs))
             raise TypeError(f'Unexpected GPU sync options: {names}')
@@ -246,7 +248,7 @@ class GPUWeightSync:
             )
         self._trainer_engine.send_weights()
 
-    def close(self):
+    def close(self) -> None:
         if self._trainer_engine is not None:
             shutdown = getattr(self._trainer_engine, 'shutdown', None)
             if callable(shutdown):
@@ -256,7 +258,7 @@ class GPUWeightSync:
         self._llm = None
 
 
-def default_weight_sync(platform, **kwargs):
+def default_weight_sync(platform: str, **kwargs: Any) -> Any:
     if platform == 'gpu':
         return GPUWeightSync(**kwargs)
     if platform == 'tpu':
